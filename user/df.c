@@ -33,8 +33,7 @@ main(int argc, char *argv[])
   printf("         total        used        free\n");
   printf("blocks  %ld  %ld  %ld\n", st.blocks, used, avail);
   printf("bytes   %ld  %ld  %ld\n", totalb, usedb, availb);
-  printf("%ld%% of the image is in use (%ld-byte blocks)\n", pct,
-         st.blocksize);
+  printf("%ld%% of the image is in use (%ld-byte blocks)\n", pct, st.blocksize);
   printf("inodes  %ld total, %ld used, %ld free\n", st.inodes,
          st.inodes - st.inodesfree, st.inodesfree);
 

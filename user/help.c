@@ -12,12 +12,12 @@
 #include "user/user.h"
 
 struct entry {
-  char *group;  // printed once, when it changes
+  char *group; // printed once, when it changes
   char *name;
-  char *args;   // "" if it takes none
+  char *args; // "" if it takes none
   char *desc;
-  char *extra;  // optional detail shown by `help <name>'
-  int minios;   // 1 = added by this project, 0 = stock xv6
+  char *extra; // optional detail shown by `help <name>'
+  int minios;  // 1 = added by this project, 0 = stock xv6
 };
 
 static struct entry cmds[] = {
@@ -124,8 +124,7 @@ main(int argc, char *argv[])
       if (strcmp(cmds[i].name, argv[1]) == 0) {
         printf("%s %s\n", cmds[i].name, cmds[i].args);
         printf("  %s\n", cmds[i].desc);
-        printf("  %s\n", cmds[i].minios ? "added by miniOS"
-                                        : "stock xv6");
+        printf("  %s\n", cmds[i].minios ? "added by miniOS" : "stock xv6");
         if (cmds[i].extra)
           printf("  %s\n", cmds[i].extra);
         exit(0);
@@ -135,8 +134,8 @@ main(int argc, char *argv[])
     exit(1);
   }
 
-  printf("miniOS help: %d commands (%d stock xv6, %d added by miniOS)\n",
-         n, n - nminios, nminios);
+  printf("miniOS help: %d commands (%d stock xv6, %d added by miniOS)\n", n,
+         n - nminios, nminios);
   printf("entries marked * are added by this project\n");
   printf("run 'help <command>' for a single entry\n\n");
 
@@ -145,9 +144,8 @@ main(int argc, char *argv[])
       group = cmds[i].group;
       printf("%s\n", group);
     }
-    printf("  %s%s%s%s - %s\n", cmds[i].minios ? "* " : "  ",
-           cmds[i].name, cmds[i].args[0] ? " " : "", cmds[i].args,
-           cmds[i].desc);
+    printf("  %s%s%s%s - %s\n", cmds[i].minios ? "* " : "  ", cmds[i].name,
+           cmds[i].args[0] ? " " : "", cmds[i].args, cmds[i].desc);
   }
 
   exit(0);

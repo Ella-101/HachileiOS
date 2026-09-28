@@ -104,8 +104,7 @@ main(int argc, char *argv[])
 
       printf("%d  %d  %s  %d  %ld  %d  %d  ", procs[i].pid, procs[i].ppid,
              statename(procs[i].state), (int)(procs[i].sz / 1024),
-             procs[i].rss / 1024, (int)procs[i].u_ticks,
-             (int)procs[i].k_ticks);
+             procs[i].rss / 1024, (int)procs[i].u_ticks, (int)procs[i].k_ticks);
       if (have)
         printf("%d  %d  %s\n", (int)(du + dk), (int)((du + dk) * 100 / elapsed),
                procs[i].name);
