@@ -1,6 +1,7 @@
 #define SBRK_ERROR ((char *)-1)
 
 #include "kernel/psinfo.h"
+#include "kernel/fsstat.h"
 
 struct stat;
 
@@ -30,6 +31,8 @@ int sync(void);
 int psinfo(struct psinfo *buf, int max);
 uint64 freemem(void);
 int klog(char *buf, int max, uint64 *seq, uint64 *lost);
+int waitx(int *status, uint64 *utime, uint64 *ktime);
+int fsinfo(struct fsstat *st);
 
 // ulib.c
 int stat(const char *, struct stat *);

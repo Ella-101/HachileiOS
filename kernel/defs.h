@@ -2,6 +2,7 @@
 struct buf;
 struct context;
 struct file;
+struct fsstat;
 struct inode;
 struct pipe;
 struct proc;
@@ -55,6 +56,9 @@ void            stati(struct inode*, struct stat*);
 int             writei(struct inode*, int, uint64, uint, uint);
 void            itrunc(struct inode*);
 void            ireclaim(int);
+void            fscount_scan(int);
+void            fscount_walk(int, uint64*, uint64*);
+void            fsinfo(struct fsstat*);
 
 // kalloc.c
 void*           kalloc(void);
@@ -100,7 +104,7 @@ void            sched(void);
 void            sleep_prepare(void*);
 void            sleep(void);
 void            userinit(void);
-int             kwait(uint64);
+int             kwait(uint64, uint64, uint64);
 void            wakeup(void*);
 void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
@@ -174,6 +178,7 @@ int             copyin(pagetable_t, uint64, char *, uint64, uint64);
 int             copyinstr(pagetable_t, uint64, char *, uint64, uint64);
 int             ismapped(pagetable_t, uint64);
 uint64          vmfault(pagetable_t, uint64, uint64, int);
+uint64          vm_rss(pagetable_t, uint64);
 
 // plic.c
 void            plicinit(void);

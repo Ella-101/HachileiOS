@@ -89,6 +89,15 @@ struct proc {
   int xstate;           // Exit status to be returned to parent's wait
   int pid;              // Process ID
 
+  // Exit-time CPU accounting, to be returned to the parent's waitx().
+  // Same convention as xstate: written under p->lock in kexit() before
+  // the process becomes a ZOMBIE, read by kwait() while still holding
+  // p->lock.  We snapshot instead of reading u_ticks/k_ticks directly
+  // because freeproc() will zero the whole slot as soon as the parent
+  // reaps it, after which there is nothing left to read.
+  uint64 xutime;        // user ticks charged over the process's lifetime
+  uint64 xktime;        // supervisor ticks charged over its lifetime
+
   // wait_lock must be held when using this:
   struct proc *parent; // Parent process
 

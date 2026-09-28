@@ -46,3 +46,5 @@ entry("sync");
 entry("psinfo");
 entry("freemem");
 entry("klog");
+entry("waitx");
+entry("fsinfo");

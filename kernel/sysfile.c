@@ -12,6 +12,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "fs.h"
+#include "fsstat.h"
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
@@ -526,5 +527,23 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_fsinfo(void)
+{
+  struct proc *p = myproc();
+  uint64 addr;
+  struct fsstat st;
+
+  argaddr(0, &addr);
+
+  // fsinfo() reads only the superblock and two counters, so no lock is
+  // needed -- and none must be held across copyout, which can fault and
+  // take kmem.lock.
+  fsinfo(&st);
+  if (copyout(p->pagetable, p->sz, addr, (char *)&st, sizeof(st)) < 0)
+    return -1;
   return 0;
 }

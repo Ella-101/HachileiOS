@@ -33,7 +33,20 @@ sys_wait(void)
 {
   uint64 p;
   argaddr(0, &p);
-  return kwait(p);
+  return kwait(p, 0, 0);
+}
+
+// waitx(status, utime, ktime): wait() plus the child's lifetime CPU
+// accounting.  The kernel freezes both counters in kexit(), so this
+// reads a value that no longer moves even though the child is gone.
+uint64
+sys_waitx(void)
+{
+  uint64 status, utime, ktime;
+  argaddr(0, &status);
+  argaddr(1, &utime);
+  argaddr(2, &ktime);
+  return kwait(status, utime, ktime);
 }
 
 uint64

@@ -156,6 +156,9 @@ UPROGS=\
 	$U/_top\
 	$U/_neofetch\
 	$U/_cputest\
+	$U/_df\
+	$U/_waitxtest\
+	$U/_help\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

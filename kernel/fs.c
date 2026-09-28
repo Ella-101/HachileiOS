@@ -18,6 +18,7 @@
 #include "proc.h"
 #include "sleeplock.h"
 #include "fs.h"
+#include "fsstat.h"
 #include "buf.h"
 #include "file.h"
 
@@ -25,6 +26,25 @@
 // there should be one superblock per disk device, but we run with
 // only one device
 struct superblock sb;
+
+// How many blocks and inodes are currently marked allocated.  These are
+// the file system's counterpart to kalloc's kmem.nfree: they make df
+// O(1) instead of walking the bitmap on every call, and they are
+// touched at exactly the four places that change allocation (balloc,
+// bfree, ialloc, ifree).
+//
+// Relaxed atomics rather than a spinlock.  The allocator sites are
+// reached from several harts concurrently, but each is already inside
+// its own locking (the inode lock, begin_op's log lock), and a reader
+// only wants a snapshot that is good enough to print.  Taking a lock
+// here would risk a lock-order inversion against those callers for no
+// accuracy gain.
+//
+// The counts are recalibrated once at boot by fscount_scan(), which
+// reads the ground truth off disk, so any drift (an aborted transaction
+// can add without ever subtracting) cannot accumulate across reboots.
+static uint64 fs_nused_blocks;
+static uint64 fs_nused_inodes;
 
 // Read the super block.
 static void
@@ -46,6 +66,78 @@ fsinit(int dev)
     panic("invalid file system");
   initlog(dev, &sb);
   ireclaim(dev);
+  // Must come after ireclaim(): reclaiming an orphan inode goes through
+  // ifree(), which subtracts from a counter that has no value yet.
+  fscount_scan(dev);
+}
+
+// Count what the bitmap and the inode table actually say is allocated,
+// by reading them off disk.  This is the O(N) reference kept for the
+// same reason freemem_walk() is: it is what you check the O(1) counters
+// against.  It costs one bread() per bitmap and inode block, which is
+// fine at boot and fine as a diagnosis, but is not something to put in
+// a refresh loop.
+void
+fscount_walk(int dev, uint64 *nblocks, uint64 *ninodes)
+{
+  uint64 nb = 0, ni = 0;
+  struct buf *bp;
+  struct dinode *dip;
+  int b, bi, inum;
+
+  for (b = 0; b < sb.size; b += BPB) {
+    bp = bread(dev, BBLOCK(b, sb));
+    for (bi = 0; bi < BPB && b + bi < sb.size; bi++) {
+      if (bp->data[bi / 8] & (1 << (bi % 8)))
+        nb++;
+    }
+    brelse(bp);
+  }
+
+  for (inum = 0; inum < sb.ninodes; inum++) {
+    bp = bread(dev, IBLOCK(inum, sb));
+    dip = (struct dinode *)bp->data + inum % IPB;
+    if (dip->type != 0)
+      ni++;
+    brelse(bp);
+  }
+
+  *nblocks = nb;
+  *ninodes = ni;
+}
+
+// Point the O(1) counters at the truth once, at boot.  Nothing has to
+// keep them exact afterwards: the only way they drift is a transaction
+// that bumped them and then never committed, and a reboot clears that.
+void
+fscount_scan(int dev)
+{
+  uint64 nb, ni;
+
+  fscount_walk(dev, &nb, &ni);
+  __atomic_store_n(&fs_nused_blocks, nb, __ATOMIC_RELAXED);
+  __atomic_store_n(&fs_nused_inodes, ni, __ATOMIC_RELAXED);
+}
+
+// Snapshot file system usage for df.  Totals come from the superblock;
+// used counts come from the O(1) counters.  Both free counts are
+// clamped: a counter can sit one transaction ahead of the disk, and
+// printing a wrapped-around uint64 would be worse than reporting zero.
+void
+fsinfo(struct fsstat *st)
+{
+  uint64 ub = __atomic_load_n(&fs_nused_blocks, __ATOMIC_RELAXED);
+  uint64 ui = __atomic_load_n(&fs_nused_inodes, __ATOMIC_RELAXED);
+
+  st->blocksize = BSIZE;
+  // The bitmap covers every block on the device -- mkfs marks the boot,
+  // super, log, inode and bitmap blocks as allocated too -- so blocks is
+  // sb.size, not sb.nblocks.  Using nblocks here would double-count the
+  // metadata and under-report free space.
+  st->blocks = sb.size;
+  st->inodes = sb.ninodes;
+  st->blocksfree = (sb.size > ub) ? sb.size - ub : 0;
+  st->inodesfree = (sb.ninodes > ui) ? sb.ninodes - ui : 0;
 }
 
 // Zero a block.
@@ -78,6 +170,7 @@ balloc(uint dev)
       if ((bp->data[bi / 8] & m) == 0) { // Is block free?
         bp->data[bi / 8] |= m;           // Mark block in use.
         log_write(bp);
+        __atomic_fetch_add(&fs_nused_blocks, 1, __ATOMIC_RELAXED);
         brelse(bp);
         bzero(dev, b + bi);
         return b + bi;
@@ -103,6 +196,7 @@ bfree(int dev, uint b)
     panic("freeing free block");
   bp->data[bi / 8] &= ~m;
   log_write(bp);
+  __atomic_fetch_sub(&fs_nused_blocks, 1, __ATOMIC_RELAXED);
   brelse(bp);
 }
 
@@ -211,6 +305,7 @@ ialloc(uint dev, short type)
       memset(dip, 0, sizeof(*dip));
       dip->type = type;
       log_write(bp); // mark it allocated on the disk
+      __atomic_fetch_add(&fs_nused_inodes, 1, __ATOMIC_RELAXED);
       brelse(bp);
       return iget(dev, inum);
     }
@@ -336,6 +431,7 @@ ifree(uint dev, uint inum)
   struct dinode *dip = (struct dinode *)bp->data + inum % IPB;
   dip->type = 0;
   log_write(bp);
+  __atomic_fetch_sub(&fs_nused_inodes, 1, __ATOMIC_RELAXED);
   brelse(bp);
 }
 
