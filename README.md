@@ -55,20 +55,24 @@ The default QEMU invocation (from the `Makefile`) is `-m 128M -smp 3`.
 | `cputest [ticks]` | CPU 时间统计的自检程序（默认累计 20 tick） |
 | `df` | 文件系统用量（块 / inode） |
 | `waitxtest [ticks]` | 子进程 CPU 时间回收的自检程序（默认 5 tick） |
-| `help [command]` | 命令索引；标注每条命令是 xv6 原版还是 miniOS 新增 |
+| `help [command]` | 命令索引；列出可用命令并标注是 xv6 原版还是 miniOS 新增 |
 
-不带参数运行 `help` 会按类别列出全部 28 个命令，每条命令的来源用一个 `*` 标出；`help ps` 则只显示该命令的用法与补充细节。xv6 的 shell 没有内建命令，所以这个索引本身也是根目录下的一个普通程序。
+镜像里共有 **29** 个用户程序（即 `UPROGS` 的 29 项）。不带参数运行 `help` 会按类别列出其中 **28 条**——除 `help` 自身以外的全部命令——并把 miniOS 新增的 8 条用 `*` 标出；`help ps` 则只显示该命令的用法与补充细节。`help` 本身是 miniOS 的第 9 个新增程序，没有把自己列进索引（一个刻意的取舍），但它与其他命令一样只是根目录里的普通程序，`ls` 能看到它。xv6 的 shell 没有内建命令，因此命令索引本身也只能是一个普通程序。
 
-Run `help` for the list of all 28 commands grouped by category, with a `*` marking the ones this project added; `help ps` shows just that entry. xv6's shell has no built-ins, so the index is itself an ordinary program in the root directory.
+The image holds **29** user programs (the 29 `UPROGS` entries). Run with no arguments, `help` lists **28** of them grouped by category — every command except `help` itself — marking the 8 added by this project with `*`; `help ps` shows just that entry. `help` is itself the 9th program this project added; it deliberately does not index itself, but it is otherwise an ordinary program in the root directory, visible to `ls`. xv6's shell has no built-ins, so the index has to be an ordinary program too.
 
 ```
 $ ps
 pid  ppid state  vsz  rss  usr sys name
-1  0  sleep  16  8  0  0  init
-2  1  sleep  20  12  0  0  sh
-3  2  run  16  8  0  0  ps
+1  0  sleep  16  16  0  0  init
+2  1  sleep  20  20  0  0  sh
+3  2  run  20  20  0  0  ps
 (vsz/rss are KB, usr/sys are timer ticks, 1 tick = 100 ms)
 ```
+
+默认构建里 `exec()` 与库函数 `sbrk()` 都立即分配内存，所以 `rss` 恰好等于 `vsz`；只有程序显式使用惰性 `sbrk`（`sbrklazy()`，目前仅 `usertests` 的惰性测试用到）时，`vsz` 才会远大于 `rss`。
+
+In the default build both `exec()` and the `sbrk()` library call allocate eagerly, so `rss` equals `vsz`; the two diverge only when a program explicitly opts into lazy `sbrk` (`sbrklazy()`, used only by `usertests`' lazy tests today).
 
 ---
 
@@ -87,6 +91,7 @@ pid  ppid state  vsz  rss  usr sys name
 | 4 | 驻留内存大小 / Resident set size | `psinfo` 扩展字段 → `ps` / `top` | ✅ 已验证 |
 | 4 | 子进程 CPU 时间回收 / Child CPU accounting | `waitx()` (26) → `waitxtest` | ✅ 已验证 |
 | 4 | 文件系统用量 / File system usage | `fsinfo()` (27) → `df` | ✅ 已验证 |
+| 4 | 命令索引 / Command index | `help` | ✅ 已验证 |
 
 ---
 
@@ -105,15 +110,22 @@ pid  ppid state  vsz  rss  usr sys name
 | `pid` / `ppid` | 进程号 / 父进程号 |
 | `state` | `PSTATE_UNUSED` … `PSTATE_ZOMBIE`（数值与 `enum procstate` 对齐） |
 | `sz` | 虚拟内存大小（**不是**常驻内存 RSS） |
+| `rss` | 常驻内存大小：`va < sz` 的已映射页数 × `PGSIZE`（批次 4 加入） |
 | `u_ticks` / `k_ticks` | 用户态 / 内核态累计 tick（批次 3 加入） |
 | `name[16]` | 进程名，保证 NUL 结尾 |
 
-`sizeof(struct psinfo) == 56`，`56 × NPROC(64) = 3584 ≤ PGSIZE`，内核用编译期断言强制这一点：
+批次 1 引入时 `sizeof(struct psinfo) == 56`；批次 3 加入 CPU 计数、批次 4 加入 `rss` 后，它变成**正好 64 字节**。内核用编译期断言强制「整张进程表的快照能放进一个 `kalloc()` 页」：
+
+Introduced at 56 bytes in batch 1, it grew to **exactly 64** once batches 3 and 4 added the CPU counters and `rss`. The kernel enforces "the whole process-table snapshot fits in one `kalloc()` page" at compile time:
 
 ```c
 typedef char psinfo_fits_one_page
     [(NPROC * sizeof(struct psinfo) <= PGSIZE) ? 1 : -1];
 ```
+
+`64 × NPROC(64) = 4096 = PGSIZE`：断言仍然成立，但余量已经为零（见批次 4 的警示框）。
+
+`64 * NPROC(64) = 4096 = PGSIZE`: the assertion still holds, but with zero headroom (see the batch 4 warning).
 
 **`freemem()` 系统调用（`SYS_freemem = 24`）**
 
@@ -328,7 +340,7 @@ Numbers live in `kernel/syscall.h`, the dispatch table in `kernel/syscall.c`, th
 | `kernel/syscall.h` / `.c` | 新系统调用编号与分发表 |
 | `kernel/defs.h` | 新函数原型 |
 | `user/user.h` / `usys.pl` | 新系统调用声明与桩 |
-| `Makefile` | `UPROGS` 增加 6 个用户程序 |
+| `Makefile` | `UPROGS` 增加 9 个用户程序（`ps` / `free` / `dmesg` / `top` / `neofetch` / `cputest` / `df` / `waitxtest` / `help`） |
 
 ---
 
@@ -386,23 +398,27 @@ Every tick is charged exactly once, so `user + sys == elapsed`.
 ```sh
 $ df
          total        used        free
-blocks  2000  745  1255
-bytes   2048000  762880  1285120
-37% of the image is in use (1024-byte blocks)
-inodes  200 total, 72 used, 128 free
+blocks  2000  1328  672
+bytes   2048000  1359872  688128
+66% of the image is in use (1024-byte blocks)
+inodes  200 total, 32 used, 168 free
 ```
 
-O(1) 计数器的正确性靠对照 O(N) 参考实现来校验：在内核里临时把 `fsinfo()` 改为调用 `fscount_walk()`，两者应当在一次干净启动后完全一致。这与批次 1 用 `freemem_walk()` 校验 `freemem()` 的做法相同。
+这是刚 `make fs.img` 出来的镜像首次启动后的读数：1328 个已用块里有 47 块是 mkfs 标出的元数据（boot / super / log / inode / 位图），其余 1281 块存放 `README` 与 29 个用户程序。
 
-Validate the O(1) counters the same way batch 1 validated `freemem()`: temporarily make `fsinfo()` call `fscount_walk()` instead; after a clean boot the two must agree exactly.
+These are the numbers for a freshly built image after its first boot: of the 1328 used blocks, 47 are metadata marked by mkfs (boot/super/log/inode/bitmap) and the other 1281 hold `README` and the 29 user programs.
+
+O(1) 计数器的正确性靠对照 O(N) 参考实现来校验：在内核里临时把 `fsinfo()` 改为调用 `fscount_walk()`，在同一次启动后两者必须完全一致（实测两侧都是 `1328` 块 / `32` inode）。这与批次 1 用 `freemem_walk()` 校验 `freemem()` 的做法相同。
+
+Validate the O(1) counters the same way batch 1 validated `freemem()`: temporarily make `fsinfo()` call `fscount_walk()` instead; on the same boot the two must agree exactly (measured: both report 1328 blocks / 32 inodes).
 
 **子进程 CPU 时间回收 / Child CPU reaping**
 
 ```sh
 $ waitxtest
-waitxtest: reaped child pid 5, status 0
-waitxtest: child  saw user 5 sys 1
-waitxtest: parent got user 5 sys 1
+waitxtest: reaped child pid 9, status 0
+waitxtest: child  saw user 5 sys 0
+waitxtest: parent got user 5 sys 0
 waitxtest: delta  user 0 sys 0
 waitxtest: OK
 ```
