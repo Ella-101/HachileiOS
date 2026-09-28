@@ -514,7 +514,12 @@ rsswalk(pagetable_t pagetable, int level, uint64 base, uint64 sz, uint64 *acc)
       break;
 
     if (level > 0 && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
-      // This PTE points to a lower-level page table.
+      // A valid PTE with none of R/W/X points to a lower-level
+      // table; this is freewalk()'s test, and it rests on the same
+      // invariant: no leaf is mapped without at least one of them.
+      // freewalk() panics if it meets such a leaf; here it would
+      // just be treated as a table pointer, so the assumption is
+      // stated rather than guarded.
       rsswalk((pagetable_t)PTE2PA(pte), level - 1, va, sz, acc);
     } else {
       *acc += PGSIZE;

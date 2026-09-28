@@ -140,6 +140,15 @@ found:
   p->xutime = 0;
   p->xktime = 0;
 
+  // name is filled in by kexec()/kfork() with safestrcpy(), which
+  // writes only up to the terminator and leaves the rest of the
+  // field untouched.  Without this, a recycled slot keeps the tail
+  // of its predecessor's name -- "initcode" renamed to "init"
+  // leaves "ode" in name[4..7].  printf("%s") stops at the NUL so
+  // ps looks fine, but psinfo() copies all 16 bytes to user space
+  // and would hand those stale kernel bytes to the caller.
+  memset(p->name, 0, sizeof(p->name));
+
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
     freeproc(p);

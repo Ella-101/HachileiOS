@@ -425,6 +425,9 @@ waitxtest: OK
 
 - **`neofetch` 报告的 CPU 数是编译期上限 `NCPU`（8），不是当前在线的 hart 数**（默认启动 `-smp 3`）。xv6 未导出运行时的 hart 数量。
   `neofetch` prints the compile-time `NCPU` (8), not the number of online harts (`-smp 3` by default); xv6 does not export the runtime hart count.
+- **`psinfo()` 的成本随进程规模增长**：快照期间会对每个进程持 `p->lock` 遍历页表树，因此映射页很多的进程会让 `psinfo()` 变慢，而 `top` 每轮都要做一次。这里不能改成「先释放锁再遍历」——那样页表可能被并发释放；这是必要权衡，不是疏漏。
+  `psinfo()` walks each process's page table while holding `p->lock`, so its cost grows with what is mapped and `top` pays it every refresh. It cannot drop the lock first, since the table could be torn down underneath it.
+
 - **RSS 是即时快照，且不区分共享页**：`rss` 统计的是快照瞬间低于 `sz` 的已映射页。若将来引入共享映射（如 COW fork 的共享父页），同一页会被计入每个进程的 RSS，与传统 `top` 的行为一致。
   RSS is an instantaneous snapshot and does not deduplicate shared pages: if shared mappings are ever added (COW parent pages, say), a shared page counts in every process's RSS, same as traditional `top`.
 - **`struct psinfo` 已无剩余空间**：加入 `rss` 后 sizeof 恰好 64，`64 × NPROC = PGSIZE`。再增字段会直接编译失败，届时快照须跨两页。
