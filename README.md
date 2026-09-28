@@ -55,6 +55,11 @@ The default QEMU invocation (from the `Makefile`) is `-m 128M -smp 3`.
 | `cputest [ticks]` | CPU 时间统计的自检程序（默认累计 20 tick） |
 | `df` | 文件系统用量（块 / inode） |
 | `waitxtest [ticks]` | 子进程 CPU 时间回收的自检程序（默认 5 tick） |
+| `help [command]` | 命令索引；标注每条命令是 xv6 原版还是 miniOS 新增 |
+
+不带参数运行 `help` 会按类别列出全部 28 个命令，每条命令的来源用一个 `*` 标出；`help ps` 则只显示该命令的用法与补充细节。xv6 的 shell 没有内建命令，所以这个索引本身也是根目录下的一个普通程序。
+
+Run `help` for the list of all 28 commands grouped by category, with a `*` marking the ones this project added; `help ps` shows just that entry. xv6's shell has no built-ins, so the index is itself an ordinary program in the root directory.
 
 ```
 $ ps
@@ -306,6 +311,7 @@ Numbers live in `kernel/syscall.h`, the dispatch table in `kernel/syscall.c`, th
 | `user/cputest.c` | CPU 时间统计自检 |
 | `user/df.c` | 文件系统用量 |
 | `user/waitxtest.c` | 子进程 CPU 时间回收自检 |
+| `user/help.c` | 命令索引，标注每条命令的来源 |
 
 ### 修改 / Modified
 
