@@ -27,6 +27,7 @@ struct psinfo {
   int state;             // one of the PSTATE_* values above
   int _pad;              // explicit padding; keeps sz 8-byte aligned
   uint64 sz;             // virtual memory size in bytes, NOT resident set size
+  uint64 rss;            // resident set size in bytes (pages actually mapped)
   uint64 u_ticks;        // timer ticks charged while in user mode
   uint64 k_ticks;        // timer ticks charged while in supervisor mode
   char name[PINFO_NAME]; // process name, always NUL-terminated
@@ -34,8 +35,13 @@ struct psinfo {
 
 // psinfo() snapshots one struct psinfo per process slot into a single
 // kalloc page, so NPROC * sizeof(struct psinfo) must fit in a page.
-// kernel/proc.c enforces this at compile time.  sizeof is currently 56
-// bytes (56 * NPROC(64) = 3584 <= PGSIZE); one more 8-byte field would
-// land exactly on 4096 and still fit, but nothing may follow it.
+// kernel/proc.c enforces this at compile time.  sizeof is currently 64
+// bytes (64 * NPROC(64) = 4096 = PGSIZE) -- the layout has NO headroom
+// left: another field would break the assertion, and adding one would
+// force the snapshot to span two pages.
+//
+// Batch 4 added rss, which took the struct from 56 to exactly 64 bytes.
+// All fields are 8-byte aligned and there is no trailing padding, so any
+// future field must displace something else or the one-page rule dies.
 
 #endif // XV6_PSINFO_H

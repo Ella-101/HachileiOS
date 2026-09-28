@@ -24,3 +24,5 @@
 #define SYS_psinfo  23
 #define SYS_freemem 24
 #define SYS_klog    25
+#define SYS_waitx   26
+#define SYS_fsinfo  27

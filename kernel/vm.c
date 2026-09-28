@@ -489,3 +489,65 @@ ismapped(pagetable_t pagetable, uint64 va)
   }
   return 0;
 }
+
+// Recursively add up the resident pages below sz.  level is 2 for a
+// top-level (L2) table down to 0 for a leaf table, and base is the
+// virtual address of slot 0 of this table.
+static void
+rsswalk(pagetable_t pagetable, int level, uint64 base, uint64 sz, uint64 *acc)
+{
+  uint64 stride = PGSIZE;
+  for (int l = 0; l < level; l++)
+    stride *= 512;
+
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = pagetable[i];
+    uint64 va;
+
+    if ((pte & PTE_V) == 0)
+      continue;
+
+    va = base + (uint64)i * stride;
+    // Slots ascend with i, so once we pass sz every later slot is past
+    // it too and can be skipped.
+    if (va >= sz)
+      break;
+
+    if (level > 0 && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+      // This PTE points to a lower-level page table.
+      rsswalk((pagetable_t)PTE2PA(pte), level - 1, va, sz, acc);
+    } else {
+      *acc += PGSIZE;
+    }
+  }
+}
+
+// Resident set size: how many bytes of the process's low sz bytes of
+// address space are backed by real pages.  This is what ps/top report
+// next to the virtual size, because with lazy sbrk growproc() hands out
+// address space that is not mapped and costs nothing until touched.
+//
+// We descend the page-table tree like freewalk() does instead of calling
+// walk() once per virtual page: with lazy allocation sz can be enormous
+// while almost none of it is mapped, and the tree walk costs time
+// proportional to what is actually mapped plus the table pages needed to
+// hold it.
+//
+// Only pages below sz count, which is why the trampoline and trapframe
+// pages at the top of the address space are excluded.  The user stack
+// lives below sz and so is legitimately part of the RSS; a stack guard
+// page is simply not mapped and so does not count.
+//
+// The table is only read here.  The caller must hold p->lock, exactly as
+// psinfo() does, so the walk cannot be racing against fork/exec/exit.
+uint64
+vm_rss(pagetable_t pagetable, uint64 sz)
+{
+  uint64 acc = 0;
+
+  if (pagetable == 0 || sz == 0)
+    return 0;
+
+  rsswalk(pagetable, 2, 0, PGROUNDUP(sz), &acc);
+  return acc;
+}

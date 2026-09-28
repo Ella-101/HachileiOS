@@ -134,6 +134,11 @@ found:
   // A recycled slot must not inherit the previous process's CPU time.
   p->u_ticks = 0;
   p->k_ticks = 0;
+  // Same reasoning for the exit-time copy: kexit() overwrites them
+  // before anyone may read them, but zeroing here means a stale
+  // predecessor can never leak through even if that changes.
+  p->xutime = 0;
+  p->xktime = 0;
 
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
@@ -365,6 +370,17 @@ kexit(int status)
   acquire(&p->lock);
 
   p->xstate = status;
+  // Freeze lifetime CPU accounting next to the exit status.  The exit
+  // path above (closing files, iput) ran in the kernel and so has
+  // already been charged to k_ticks, which is exactly what we want the
+  // parent to see.  These are read back without atomics by kwait(),
+  // which holds p->lock just like we do here.
+  //
+  // This is still sampling, so it can be up to one tick short: a timer
+  // interrupt landing between this load and the sched() below would
+  // charge a tick nobody reports. Same granularity as xstate itself.
+  p->xutime = __atomic_load_n(&p->u_ticks, __ATOMIC_RELAXED);
+  p->xktime = __atomic_load_n(&p->k_ticks, __ATOMIC_RELAXED);
   p->state = ZOMBIE;
 
   release(&wait_lock);
@@ -376,8 +392,14 @@ kexit(int status)
 
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
+//
+// addr receives the exit status (plain wait); uaddr/kaddr receive the
+// child's lifetime user/supervisor ticks (waitx).  All three are
+// optional and may be 0.  Anything copied out has to be read before
+// freeproc() wipes the slot, which is why xstate/xutime/xktime are all
+// frozen at exit time rather than read live.
 int
-kwait(uint64 addr)
+kwait(uint64 addr, uint64 uaddr, uint64 kaddr)
 {
   struct proc *pp;
   int havekids, pid;
@@ -397,9 +419,17 @@ kwait(uint64 addr)
         if (pp->state == ZOMBIE) {
           // Found one.
           pid = pp->pid;
-          if (addr != 0 &&
-              copyout(p->pagetable, p->sz, addr, (char *)&pp->xstate,
-                      sizeof(pp->xstate)) < 0) {
+          // Short-circuiting || stops at the first failure, leaving any
+          // later destination untouched, same as plain wait() does.
+          if ((addr != 0 &&
+               copyout(p->pagetable, p->sz, addr, (char *)&pp->xstate,
+                       sizeof(pp->xstate)) < 0) ||
+              (uaddr != 0 &&
+               copyout(p->pagetable, p->sz, uaddr, (char *)&pp->xutime,
+                       sizeof(pp->xutime)) < 0) ||
+              (kaddr != 0 &&
+               copyout(p->pagetable, p->sz, kaddr, (char *)&pp->xktime,
+                       sizeof(pp->xktime)) < 0)) {
             release(&pp->lock);
             release(&wait_lock);
             return -1;
@@ -717,6 +747,11 @@ psinfo(uint64 uaddr, int max)
         e->state = p->state;
         e->_pad = 0;
         e->sz = p->sz;
+        // Walk the page table while still holding p->lock, so the table
+        // cannot be torn down underneath us.  This is a tree walk, not
+        // one walk() per virtual page, because sz is handed out lazily
+        // and may describe far more address space than is mapped.
+        e->rss = vm_rss(p->pagetable, p->sz);
         // Updated lock-free by whichever hart is running p, so read
         // them with relaxed atomics for a consistent snapshot.
         e->u_ticks = __atomic_load_n(&p->u_ticks, __ATOMIC_RELAXED);

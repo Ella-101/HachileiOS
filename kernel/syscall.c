@@ -106,6 +106,8 @@ extern uint64 sys_sync(void);
 extern uint64 sys_psinfo(void);
 extern uint64 sys_freemem(void);
 extern uint64 sys_klog(void);
+extern uint64 sys_waitx(void);
+extern uint64 sys_fsinfo(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -136,6 +138,8 @@ static uint64 (*syscalls[])(void) = {
   [SYS_psinfo]  = sys_psinfo,
   [SYS_freemem] = sys_freemem,
   [SYS_klog]    = sys_klog,
+  [SYS_waitx]   = sys_waitx,
+  [SYS_fsinfo]  = sys_fsinfo,
   // clang-format on
 };
 

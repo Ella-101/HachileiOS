@@ -53,14 +53,16 @@ The default QEMU invocation (from the `Makefile`) is `-m 128M -smp 3`.
 | `top [n]` | 周期性刷新进程表 + CPU 增量（默认 10 次） |
 | `neofetch` | 一次性系统概览 |
 | `cputest [ticks]` | CPU 时间统计的自检程序（默认累计 20 tick） |
+| `df` | 文件系统用量（块 / inode） |
+| `waitxtest [ticks]` | 子进程 CPU 时间回收的自检程序（默认 5 tick） |
 
 ```
 $ ps
-pid  ppid state  size  usr sys name
-1  0  sleep  16  0  0  init
-2  1  sleep  20  0  0  sh
-3  2  run  16  0  0  ps
-(usr/sys are timer ticks, 1 tick = 100 ms)
+pid  ppid state  vsz  rss  usr sys name
+1  0  sleep  16  8  0  0  init
+2  1  sleep  20  12  0  0  sh
+3  2  run  16  8  0  0  ps
+(vsz/rss are KB, usr/sys are timer ticks, 1 tick = 100 ms)
 ```
 
 ---
@@ -77,6 +79,9 @@ pid  ppid state  size  usr sys name
 | 2 | 周期刷新视图 / Periodic process view | `top` | ✅ 已验证 |
 | 2 | 系统概览 / System summary | `neofetch` | ✅ 已验证 |
 | 3 | 每进程 CPU 时间 / Per-process CPU time | `psinfo` 扩展字段 → `ps` / `top` / `cputest` | ✅ 已验证 |
+| 4 | 驻留内存大小 / Resident set size | `psinfo` 扩展字段 → `ps` / `top` | ✅ 已验证 |
+| 4 | 子进程 CPU 时间回收 / Child CPU accounting | `waitx()` (26) → `waitxtest` | ✅ 已验证 |
+| 4 | 文件系统用量 / File system usage | `fsinfo()` (27) → `df` | ✅ 已验证 |
 
 ---
 
@@ -202,6 +207,72 @@ if (p) {
 
 ---
 
+### 批次 4 — 补齐三个观测盲点 / Batch 4 — Closing three observability gaps
+
+批次 4 不引入任何新机制，只是把批次 1–3 已经铺好的骨架填完整，所以每一项都能独立验证。
+
+Batch 4 introduces no new machinery; it fills in three gaps in the skeleton batches 1-3 already built, so each item is independently verifiable.
+
+**RSS：驻留内存大小 / Resident set size**
+
+`ps` / `top` 原先只能报 `sz`，即 `growproc()` 交出去的**虚拟**地址空间；在惰性分配下它会远大于实际占用。`struct psinfo` 新增 `rss` 字段，由 `kernel/vm.c` 的 `vm_rss()` 计算。
+
+English recap: `sz` is virtual size granted by `growproc()`; under lazy `sbrk` it can far exceed real usage. `rss`, computed by `vm_rss()` in `kernel/vm.c`, reports what is actually mapped.
+
+```c
+uint64
+vm_rss(pagetable_t pagetable, uint64 sz)
+{
+  uint64 acc = 0;
+  if (pagetable == 0 || sz == 0)
+    return 0;
+  rsswalk(pagetable, 2, 0, PGROUNDUP(sz), &acc);
+  return acc;
+}
+```
+
+三个决定都能追溯到成本与正确性：
+
+Three decisions worth spelling out:
+
+- **遍历页表树，而不是逐页调用 `walk()`。** 惰性 sbrk 下 `sz` 可以很大而几乎没有映射，按虚拟页循环的成本正比于 `sz / PGSIZE`；像 `freewalk()` 那样下降三级页表，成本只正比于真正映射的页数加上承载它们的页表页。
+  Walking the tree rather than looping over virtual pages: with lazy allocation the tree walk costs time proportional to what is actually mapped, not to `sz`.
+- **只统计 `va < sz` 的叶子。** 因此位于地址空间顶端的 trampoline 与 trapframe 页被自然排除；用户栈在 `sz` 之下，属于 RSS；栈保护页未被映射，自然不计入。
+  Only leaves below `sz` count, so trampoline/trapframe are excluded while the user stack is included.
+- **调用者持有 `p->lock`**（`psinfo()` 正是如此），因此遍历期间页表不会被拆掉；本函数只读。
+  The caller holds `p->lock`, so the walk cannot race against teardown, and nothing is written.
+
+> ⚠️ **`struct psinfo` 已无任何余量。** 加入 `rss` 后 sizeof 从 56 变到**正好 64 字节**，`64 × NPROC(64) = 4096 = PGSIZE`，编译期断言仍能通过但已经踩满。**再增加任何字段都会编译失败**，届时快照必须跨两页。这是有意的护栏，不是需要绕过的 bug。
+> With `rss`, `sizeof(struct psinfo)` is now exactly 64, so `64 * NPROC = PGSIZE`. The assertion still passes but there is zero headroom left: any further field would require the snapshot to span two pages.
+
+**`waitx()` 系统调用（`SYS_waitx = 26`）**
+
+- 原型 / Prototype: `int waitx(int *status, uint64 *utime, uint64 *ktime);`
+- 语义等同 `wait()`，额外回填子进程整个生命周期的用户态 / 内核态 tick。三个指针都可以传 0。
+  Same semantics as `wait()`, plus the child's lifetime user/supervisor ticks. All three pointers may be 0.
+- 子进程账目在 `kexit()` 中**冻结**到 `xutime` / `xktime`（位置紧邻既有的 `xstate`），由 `kwait()` 在仍持 `p->lock` 时读出。之所以必须冻结：`freeproc()` 会在父进程收割的瞬间把整个槽位清零，之后就无值可读。
+  Accounting is frozen in `kexit()` into `xutime`/`xktime` and read by `kwait()` under `p->lock`, because `freeproc()` wipes the slot the moment the parent reaps.
+- 冻结点刻意放在退出路径**全部清理之后**：`fileclose()` 与 `iput()` 都在内核态执行并已计入 `k_ticks`，父进程理应看到这部分开销。
+  The freeze happens after all cleanup, so kernel work done during exit is included.
+- `allocproc()` 同时清零这两个字段，与 `u_ticks` / `k_ticks` 采用同一条理由：回收的槽位不得继承上个进程的账目。
+  `allocproc()` zeroes them too, for the same reason it zeroes `u_ticks`/`k_ticks`.
+
+**`fsinfo()` 系统调用（`SYS_fsinfo = 27`）**
+
+- 原型 / Prototype: `int fsinfo(struct fsstat *st);` —— 布局定义在共享头 `kernel/fsstat.h`。
+- 块用量是 **O(1)**：`balloc()` / `bfree()` 处增减 `fs_nused_blocks`，`ialloc()` / `ifree()` 处增减 `fs_nused_inodes`。这与 `kmem.nfree` 是同一套思路。
+  Block usage is O(1), maintained at the four allocator sites, the same idea as `kmem.nfree`.
+- **启动时用 `fscount_scan()` 校准一次**，把读数直接从磁盘扫出来的真值灌进计数器。计数器只维护增量，标定不可省；事务回滚可以让它偏高一格，重启即可清除。
+  A one-time `fscount_scan()` at boot seeds the counters from ground truth on disk; the counters track deltas only, so seeding cannot be skipped.
+- 同理保留 **O(N) 参考实现 `fscount_walk()`**，用于在之后校准/对照——与 `freemem_walk()` 的角色一致（它被导出但不被任何生产路径调用）。
+  The O(N) `fscount_walk()` is kept as a reference, mirroring `freemem_walk()`: exported, unused in production paths.
+- 用 relaxed atomic 而非自旋锁：分配点本身已在各自的锁（inode 锁、日志锁）之内，加锁反而有锁序反转风险。
+  Relaxed atomics, not a spinlock: the allocator sites already sit inside their own locks, so locking here risks lock-order inversion for no accuracy gain.
+- `total` 用 **`sb.size`（整盘块数）而非 `sb.nblocks`（数据块数）**：mkfs 把 boot / super / log / inode / 位图块也在同一张位图里标记为已用，用 `nblocks` 会重复扣减元数据并少报可用空间。
+  `total` is `sb.size`, not `sb.nblocks`: mkfs marks metadata blocks as allocated in the same bitmap, so using `nblocks` would double-count them.
+
+---
+
 ## 新增系统调用 / New system calls
 
 | 编号 | 名称 | 用户态原型 | 返回 |
@@ -209,6 +280,8 @@ if (p) {
 | 23 | `SYS_psinfo` | `int psinfo(struct psinfo *buf, int max)` | 写入条目数，或 `-1` |
 | 24 | `SYS_freemem` | `uint64 freemem(void)` | 空闲字节数 |
 | 25 | `SYS_klog` | `int klog(char *buf, int max, uint64 *seq, uint64 *lost)` | 复制字节数，或 `-1` |
+| 26 | `SYS_waitx` | `int waitx(int *status, uint64 *utime, uint64 *ktime)` | 子进程 pid，或 `-1` |
+| 27 | `SYS_fsinfo` | `int fsinfo(struct fsstat *st)` | `0`，或 `-1` |
 
 编号定义在 `kernel/syscall.h`，分发表在 `kernel/syscall.c`，实现在 `kernel/sysproc.c`，用户桩由 `user/usys.pl` 生成。
 
@@ -224,20 +297,25 @@ Numbers live in `kernel/syscall.h`, the dispatch table in `kernel/syscall.c`, th
 | --- | --- |
 | `kernel/psinfo.h` | `struct psinfo` 布局 + `PSTATE_*` 常量，内核/用户共享 |
 | `kernel/minios.h` | `MINIOS_MEM_TOTAL` 等共享常量 |
+| `kernel/fsstat.h` | `struct fsstat` 布局，内核/用户共享 |
 | `user/ps.c` | 进程列表 |
 | `user/free.c` | 内存用量 |
 | `user/dmesg.c` | 内核日志回放 |
 | `user/top.c` | 周期刷新视图 + CPU 增量 |
 | `user/neofetch.c` | 系统概览 |
 | `user/cputest.c` | CPU 时间统计自检 |
+| `user/df.c` | 文件系统用量 |
+| `user/waitxtest.c` | 子进程 CPU 时间回收自检 |
 
 ### 修改 / Modified
 
 | 文件 | 改动 |
 | --- | --- |
 | `kernel/kalloc.c` | `kmem.nfree` O(1) 计数器；`freemem()`、`freemem_walk()` |
+| `kernel/vm.c` | `vm_rss()` 驻留页统计（递归遍历三级页表） |
+| `kernel/fs.c` | O(1) 块/inode 计数器；`fscount_scan()`、`fscount_walk()`、`fsinfo()` |
 | `kernel/printk.c` | 无锁日志环形缓冲区；`kputc()` tee；`klog_read()` |
-| `kernel/proc.h` | `struct proc` 增加 `u_ticks` / `k_ticks` |
+| `kernel/proc.h` | `struct proc` 增加 `u_ticks` / `k_ticks` / `xutime` / `xktime` |
 | `kernel/proc.c` | `allocproc()` 清零计数；`psinfo()` 快照 + 编译期页大小断言 |
 | `kernel/trap.c` | `clockintr()` 按 hart 计费并拆分为用户/内核态 |
 | `kernel/sysproc.c` | `sys_psinfo` / `sys_freemem` / `sys_klog` |
@@ -258,6 +336,11 @@ Numbers live in `kernel/syscall.h`, the dispatch table in `kernel/syscall.c`, th
 | `copyout` 前先填内核暂存页并释放所有锁 | `copyout` 可能缺页 → `vmfault` → `kalloc` → `kmem.lock`，在持锁期间调用有死锁风险 |
 | `klog` 用用户态持有的 in/out 游标 | 内核无需为每个进程保存读取位置；`lost` 明确报告被覆盖的字节数 |
 | `top` 刷新次数有界 | xv6 没有信号，用户程序无法被 shell 中断，因此不能无限循环 |
+| RSS 走页表树而非逐页 `walk` | 惰性 `sbrk` 下 `sz` 可远大于实际映射量；树遍历成本只正比于真正在的东西 |
+| `waitx` 在 `kexit()` 冻结账目 | `freeproc()` 会清零整个槽位，退出后无处可读；冻结同时把退出路径自身的内核开销包含进去 |
+| 块/inode 用量用 O(1) 计数器 | 与 `kmem.nfree` 同一思路；`df` 可能被频繁调用。启动时由 `fscount_scan()` 从磁盘真值标定一次 |
+| 计数器用 relaxed atomic 而非自旋锁 | 分配点已在各自的 inode/日志锁之内，此处加锁有锁序反转风险且得不到额外精度 |
+| 保留 `fscount_walk()` 参考实现 | 与 `freemem_walk()` 同角色：导出、不被生产路径调用，用于对照校验 O(1) 计数器 |
 
 ---
 
@@ -292,6 +375,36 @@ cputest: OK
 
 Every tick is charged exactly once, so `user + sys == elapsed`.
 
+**文件系统用量 / File system usage**
+
+```sh
+$ df
+         total        used        free
+blocks  2000  745  1255
+bytes   2048000  762880  1285120
+37% of the image is in use (1024-byte blocks)
+inodes  200 total, 72 used, 128 free
+```
+
+O(1) 计数器的正确性靠对照 O(N) 参考实现来校验：在内核里临时把 `fsinfo()` 改为调用 `fscount_walk()`，两者应当在一次干净启动后完全一致。这与批次 1 用 `freemem_walk()` 校验 `freemem()` 的做法相同。
+
+Validate the O(1) counters the same way batch 1 validated `freemem()`: temporarily make `fsinfo()` call `fscount_walk()` instead; after a clean boot the two must agree exactly.
+
+**子进程 CPU 时间回收 / Child CPU reaping**
+
+```sh
+$ waitxtest
+waitxtest: reaped child pid 5, status 0
+waitxtest: child  saw user 5 sys 1
+waitxtest: parent got user 5 sys 1
+waitxtest: delta  user 0 sys 0
+waitxtest: OK
+```
+
+`waitxtest` 让两条**互相独立**的路径读同一进程的两个计数器：子进程用 `psinfo()` 自测并通过管道回报，父进程用 `waitx()` 回收同一进程。两者必须在 `TOLERANCE = 4` tick 内吻合，且**只能单向偏** —— `kexit()` 的冻结晚于子进程的自读时刻，所以父进程可以多一点，绝不可能少。
+
+`waitxtest` reads the same two counters through two independent paths: the child measures itself with `psinfo()` and reports over a pipe, while the parent reaps it with `waitx()`. They must agree within `TOLERANCE = 4` ticks, and only in one direction: the freeze happens after the child read itself, so the parent may see more, never less.
+
 **手动检查 / Manual checks**
 
 - `dmesg` 可回放内核启动日志；执行 `echo hello` 后再 `dmesg`，**不会**包含 `hello` —— 证明 tee 边界正确（用户态 `printf` 不属于内核日志）。实际上 `init: starting sh` 也不出现，因为那是用户程序输出。
@@ -306,8 +419,14 @@ Every tick is charged exactly once, so `user + sys == elapsed`.
 
 - **`neofetch` 报告的 CPU 数是编译期上限 `NCPU`（8），不是当前在线的 hart 数**（默认启动 `-smp 3`）。xv6 未导出运行时的 hart 数量。
   `neofetch` prints the compile-time `NCPU` (8), not the number of online harts (`-smp 3` by default); xv6 does not export the runtime hart count.
-- `ps` / `top` 的 `size` 列是**虚拟内存大小**（`p->sz`），不是常驻内存 RSS。惰性分配（lazy `sbrk`）下它可能远大于实际占用。
-  The `size` column is virtual size (`p->sz`), not RSS; under lazy `sbrk` it can far exceed real usage.
+- **RSS 是即时快照，且不区分共享页**：`rss` 统计的是快照瞬间低于 `sz` 的已映射页。若将来引入共享映射（如 COW fork 的共享父页），同一页会被计入每个进程的 RSS，与传统 `top` 的行为一致。
+  RSS is an instantaneous snapshot and does not deduplicate shared pages: if shared mappings are ever added (COW parent pages, say), a shared page counts in every process's RSS, same as traditional `top`.
+- **`struct psinfo` 已无剩余空间**：加入 `rss` 后 sizeof 恰好 64，`64 × NPROC = PGSIZE`。再增字段会直接编译失败，届时快照须跨两页。
+  There is no room left in `struct psinfo`: with `rss` its size is exactly 64 and `64 * NPROC == PGSIZE`. Adding a field fails to compile by design.
+- **`waitx` 的账目可能少一格 tick**：冻结发生在退出路径末尾，此后到 `sched()` 之间若有定时器中断，那一格不会被任何人记录。这是 tick 级采样精度的固有边界。
+  `waitx` accounting can be one tick short: the freeze happens at the end of the exit path, and a timer interrupt after it is charged to nobody. This is inherent to tick-granularity sampling.
+- **`df` 的 `total` 是整盘块数而非"可放数据的块数"**：mkfs 把元数据块也在同一张位图里标记为已用，因此它们计入 used。这与 Linux `df` 的语义略窄 —— 想看数据块余量，应从 total 中扣掉 `nmeta`。
+  `df`'s `total` counts the whole image, not only data blocks: mkfs marks metadata blocks used in the same bitmap. The narrower "data blocks remaining" figure would subtract `nmeta`.
 - CPU 时间是**采样**得到：内核把 tick 记给被中断的那个进程，因此单次连续占用不足 1 tick（100 ms）的进程可能显示为 0。
   CPU time is **sampled**: a process that burns less than one tick (100 ms) at a stretch may show up as 0.
 - `uptime()`（全局 `ticks`）只在 hart 0 上递增，而被统计的进程可能运行在任意 hart 上，因此两者之间存在少量偏斜；`cputest` 的容差 `TOLERANCE = 4` 即为此设置。
@@ -319,13 +438,13 @@ Every tick is charged exactly once, so `user + sys == elapsed`.
 
 ## 路线图 / Roadmap
 
-已完成批次 1–3。后续候选方向（尚未排期）：
+已完成批次 1–4。后续候选方向（尚未排期）：
 
-Batches 1–3 are complete. Candidate directions not yet scheduled:
+Batches 1-4 are complete. Candidate directions not yet scheduled:
 
-- `df` —— 文件系统用量统计（superblock / 位图）
-- `kalloc` 调试设施（双重释放 / 泄漏检测）
-- 其他子系统（调度器、虚拟内存、网络）—— 待定
+- `kalloc` 调试设施（双重释放 / 泄漏检测）、运行时在线 hart 数 —— 批次 5
+- 磁盘 I/O 计数（`bio.c` 累计读写块数）—— 批次 5
+- 其他子系统（调度器优先级、信号、COW fork）—— 批次 6+，工作量显著更大
 
 ---
 

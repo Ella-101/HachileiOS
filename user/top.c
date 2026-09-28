@@ -91,7 +91,7 @@ main(int argc, char *argv[])
     printf("\033[2J\033[H");
     printf("miniOS top   refresh %d/%d   uptime %d ticks   free %ld bytes\n",
            it + 1, iters, up, freemem());
-    printf("pid  ppid state  size  usr sys  dcpu  busy%%  name\n");
+    printf("pid  ppid state  vsz  rss  usr sys  dcpu  busy%%  name\n");
     for (i = 0; i < n; i++) {
       struct psinfo old;
       uint64 du, dk;
@@ -102,16 +102,17 @@ main(int argc, char *argv[])
       du = have ? procs[i].u_ticks - old.u_ticks : 0;
       dk = have ? procs[i].k_ticks - old.k_ticks : 0;
 
-      printf("%d  %d  %s  %d  %d  %d  ", procs[i].pid, procs[i].ppid,
+      printf("%d  %d  %s  %d  %ld  %d  %d  ", procs[i].pid, procs[i].ppid,
              statename(procs[i].state), (int)(procs[i].sz / 1024),
-             (int)procs[i].u_ticks, (int)procs[i].k_ticks);
+             procs[i].rss / 1024, (int)procs[i].u_ticks,
+             (int)procs[i].k_ticks);
       if (have)
         printf("%d  %d  %s\n", (int)(du + dk), (int)((du + dk) * 100 / elapsed),
                procs[i].name);
       else
         printf("-  -  %s\n", procs[i].name);
     }
-    printf("(usr/sys/dcpu are timer ticks, 1 tick = 100 ms)\n");
+    printf("(vsz/rss are KB, usr/sys/dcpu are timer ticks, 1 tick = 100 ms)\n");
 
     // Current snapshot becomes the baseline for the next refresh.
     for (i = 0; i < n; i++)
