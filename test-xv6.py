@@ -87,6 +87,22 @@ class QEMU(object):
     def lines(self):
         return self.output.splitlines()
 
+    # Wait until the guest has reached a shell prompt, so that a command
+    # written to the console is actually read by sh.  Booting under
+    # emulation can take several seconds on a loaded machine, and the old
+    # fixed one-second sleep was not always enough: the logstress command
+    # could still be sitting in the UART when the harness killed qemu,
+    # leaving no pending log and no files to recover.
+    def wait_shell(self, timeout=30):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(0.5)
+            self.read()
+            for line in self.lines():
+                if re.match(r'\$ *$', line):
+                    return
+        return
+
     def error(self, *regexps):
         print("FAIL: match failed", regexps)
         self.save_output()
@@ -115,39 +131,50 @@ class QEMU(object):
                 print(line)
         self.reported = end
 
-    def monitor(self, *regexps, progress="", timeout):
+    def monitor(self, *regexps, progress="", timeout, fail=True):
         deadline = time.time() + timeout
         while True:
             time.sleep(1)
             timeleft = deadline - time.time()
             if timeleft < 0:
-                self.error(*regexps)
+                if fail:
+                    self.error(*regexps)
+                return False
             self.read()
             if progress:
                 self.progress(progress)
             if self.match(*regexps, exit=False):
-                return
+                return True
 
 def crash_log():
     q = QEMU(True)
+    q.wait_shell()
     q.cmd("logstress f0 f1 f2 f3 f4 f5\n")
-    time.sleep(2)
+    # logstress forks six children that each create one file; give them
+    # long enough to all get going before pulling the plug.  If the crash
+    # lands too early the recovered image may be missing f5, which the
+    # caller now treats as a retryable failure rather than a hard error.
+    time.sleep(5)
     q.crash()
     q.stop()
 
 def recover_log():
     q = QEMU()
-    time.sleep(2)
+    q.wait_shell()
     q.read()
     ok = q.match('^recovering', exit=False)
     if ok:
         q.cmd("ls\n")
-        q.monitor('f5', timeout=30)
+        # A missing f5 means this attempt crashed before logstress created
+        # all its files; report it so test_log can retry instead of
+        # aborting the whole run.
+        ok = q.monitor('f5', timeout=10, fail=False)
     q.stop()
     return ok
 
 def forphan():
     q = QEMU(True)
+    q.wait_shell()
     q.cmd("forphan\n")
     q.monitor('wait', timeout=30)
     q.crash()
@@ -155,6 +182,7 @@ def forphan():
 
 def dorphan():
     q = QEMU(True)
+    q.wait_shell()
     q.cmd("dorphan\n")
     q.monitor('wait', timeout=30)
     q.crash()
@@ -203,6 +231,7 @@ def test_usertests(test=""):
     elif test != "":
         opt += " " + test
     q = QEMU(True)
+    q.wait_shell()
     q.cmd("usertests" + opt + "\n")
     q.monitor('^ALL TESTS PASSED', progress='test', timeout=timeout)
     q.stop()
