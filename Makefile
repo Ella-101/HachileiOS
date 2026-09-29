@@ -159,6 +159,7 @@ UPROGS=\
 	$U/_df\
 	$U/_waitxtest\
 	$U/_help\
+	$U/_priotest\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

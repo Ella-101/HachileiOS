@@ -56,17 +56,18 @@ The default QEMU invocation (from the `Makefile`) is `-m 128M -smp 3`.
 | `df` | 文件系统用量（块 / inode） |
 | `waitxtest [ticks]` | 子进程 CPU 时间回收的自检程序（默认 5 tick） |
 | `help [command]` | 命令索引；列出可用命令并标注是 xv6 原版还是 miniOS 新增 |
+| `priotest [ticks]` | 调度优先级与老化的自检程序（默认各跑 20 tick） |
 
-镜像里共有 **29** 个用户程序（即 `UPROGS` 的 29 项）。不带参数运行 `help` 会按类别列出其中 **28 条**——除 `help` 自身以外的全部命令——并把 miniOS 新增的 8 条用 `*` 标出；`help ps` 则只显示该命令的用法与补充细节。`help` 本身是 miniOS 的第 9 个新增程序，没有把自己列进索引（一个刻意的取舍），但它与其他命令一样只是根目录里的普通程序，`ls` 能看到它。xv6 的 shell 没有内建命令，因此命令索引本身也只能是一个普通程序。
+镜像里共有 **30** 个用户程序（即 `UPROGS` 的 30 项）。不带参数运行 `help` 会按类别列出其中 **29 条**——除 `help` 自身以外的全部命令——并把 miniOS 新增的 9 条用 `*` 标出；`help ps` 则只显示该命令的用法与补充细节。`help` 本身是 miniOS 的第 10 个新增程序，没有把自己列进索引（一个刻意的取舍），但它与其他命令一样只是根目录里的普通程序，`ls` 能看到它。xv6 的 shell 没有内建命令，因此命令索引本身也只能是一个普通程序。
 
-The image holds **29** user programs (the 29 `UPROGS` entries). Run with no arguments, `help` lists **28** of them grouped by category — every command except `help` itself — marking the 8 added by this project with `*`; `help ps` shows just that entry. `help` is itself the 9th program this project added; it deliberately does not index itself, but it is otherwise an ordinary program in the root directory, visible to `ls`. xv6's shell has no built-ins, so the index has to be an ordinary program too.
+The image holds **30** user programs (the 30 `UPROGS` entries). Run with no arguments, `help` lists **29** of them grouped by category — every command except `help` itself — marking the 9 added by this project with `*`; `help ps` shows just that entry. `help` is itself the 10th program this project added; it deliberately does not index itself, but it is otherwise an ordinary program in the root directory, visible to `ls`. xv6's shell has no built-ins, so the index has to be an ordinary program too.
 
 ```
 $ ps
-pid  ppid state  vsz  rss  usr sys name
-1  0  sleep  16  16  0  0  init
-2  1  sleep  20  20  0  0  sh
-3  2  run  20  20  0  0  ps
+pid  ppid state  vsz  rss  usr sys prio name
+1  0  sleep  16  16  0  0  5  init
+2  1  sleep  20  20  0  0  5  sh
+3  2  run  20  20  0  0  5  ps
 (vsz/rss are KB, usr/sys are timer ticks, 1 tick = 100 ms)
 ```
 
@@ -96,6 +97,7 @@ In the default build both `exec()` and the `sbrk()` library call allocate eagerl
 | 5 | 运行时在线 hart 数 / Online hart count | `sysinfo()` (28) → `neofetch` | ✅ 已验证 |
 | 5 | 磁盘 I/O 与缓存命中 / Disk I/O & cache hits | `sysinfo()` (28) → `neofetch` | ✅ 已验证 |
 | 5 | 按需分页计数 / Demand paging count | `sysinfo()` (28) → `neofetch` | ✅ 已验证 |
+| 6 | 调度器优先级 / Scheduler priorities | `setprio()` (29) → `ps` / `priotest` | ✅ 已验证 |
 
 ---
 
@@ -340,6 +342,38 @@ Batch 5 closed the two gaps batch 4 left open (the metadata figure in `df`, the 
 ---
 
 
+### 批次 6 — 调度器优先级 / Batch 6 — Scheduler priorities
+
+批次 5 为止，本项目新增的每一个系统调用都是**只读**的。批次 6 引入第一个**写型**系统调用，并第一次改动调度语义 —— 这使它不同于前面所有批次：观测能力只读内核状态，随时可以整体回滚；而调度策略会改变每一个进程的运行机会。
+
+Until batch 6 every syscall this project added was read-only. Batch 6 adds the first one that writes kernel state, and the first change to scheduling semantics.
+
+**`setprio()` 系统调用（`SYS_setprio = 29`）**
+
+- 原型 / Prototype: `int setprio(int pid, int prio);` —— **数值越小越紧急**，范围 `PRIO_HIGHEST`(0)..`PRIO_LOWEST`(9)，常量定义在共享头 `kernel/psinfo.h`。
+- **无权限检查**：xv6 没有 uid/gid，任何进程都可以修改任何进程的优先级。这是显式记录的教学简化。
+  There is no permission check — xv6 has no uid/gid, so any process may change any other process's priority. A stated teaching simplification.
+- **fork 不继承优先级**：`kfork()` 是逐字段复制而非 `*np = *p`，所以新进程从 `PRIO_DEFAULT`(5) 开始。这让"每个进程起点平等"成为可预测的语义，也让优先级只能通过显式 `setprio` 改变。
+
+**调度器：单遍择优 + 老化 / One-pass choose-and-age**
+
+`struct proc` 增加两个字段：`prio`（静态，由用户设置）与 `cur_prio`（动态，调度器实际比较的值）。`scheduler()` 从"取第一个 `RUNNABLE`"改为"取 `cur_prio` 最小者"，并在**同一次扫描**中给每个仍可运行却未被选中的进程把 `cur_prio` 减一 —— 这就是老化。
+
+被选中的进程在切换前把 `cur_prio` 重置回 `prio`：稳态下高优先级进程每轮都赢，而低优先级进程的 `cur_prio` 持续下降，因此每 `PRIO_LOWEST - PRIO_HIGHEST + 1 = 10` 轮必然被选中一次 —— **这是不饥饿的保证，也是"优先级"与"饿死"之间的分界线**。`PRIO_AGING_FLOOR` 防止计数器在长时间运行后向 `INT_MIN` 漂移。
+
+三个值得写下来的工程决定 / Three engineering points:
+
+1. **为什么老化不是可选项**：`kernel/trap.c` 每个 tick 都调用 `yield()`，因此调度器每 tick 重新择优。纯静态优先级意味着低优先级进程只能在高优先级进程全部阻塞时才运行 —— 在 `usertests` 那种并发子进程密集的负载下，这会直接表现为间歇性失败。
+2. **择优与老化合并成一遍**：唯一后果是"被选中者自己也被减了一"，而它在切换前会被重置，所以结果与两遍扫描等价，却省掉一次 O(NPROC) 遍历。
+3. **`best` 指针必须重新校验**：`proc` 数组是静态的，指针始终有效；但选中后必须**重新持锁确认 `state == RUNNABLE`** —— 该进程可能在这一遍扫描期间睡眠、退出，甚至其槽位已被回收复用。这是 `scheduler()` 里唯一容易写错的地方。
+
+**自检 / Self-check**
+
+`priotest` 让两个子进程各在用户态自旋相同的 tick 数，父进程把其中一个设为最紧急、另一个设为最松弛，再用 `waitx()` 比较两者的 CPU 时间。它同时断言两件事：紧急进程必须明显领先（优先级生效），且松弛进程必须拿到 CPU（老化生效）。**只看前者无法区分"调度正确"与"低优先级被饿死"。**
+
+---
+
+
 ## 新增系统调用 / New system calls
 
 | 编号 | 名称 | 用户态原型 | 返回 |
@@ -350,6 +384,7 @@ Batch 5 closed the two gaps batch 4 left open (the metadata figure in `df`, the 
 | 26 | `SYS_waitx` | `int waitx(int *status, uint64 *utime, uint64 *ktime)` | 子进程 pid，或 `-1` |
 | 27 | `SYS_fsinfo` | `int fsinfo(struct fsstat *st)` | `0`，或 `-1` |
 | 28 | `SYS_sysinfo` | `int sysinfo(struct sysinfo *info)` | `0`，或 `-1` |
+| 29 | `SYS_setprio` | `int setprio(int pid, int prio)` | `0`，或 `-1` |
 
 编号定义在 `kernel/syscall.h`，分发表在 `kernel/syscall.c`，实现在 `kernel/sysproc.c`，用户桩由 `user/usys.pl` 生成。
 
@@ -363,7 +398,7 @@ Numbers live in `kernel/syscall.h`, the dispatch table in `kernel/syscall.c`, th
 
 | 文件 | 说明 |
 | --- | --- |
-| `kernel/psinfo.h` | `struct psinfo` 布局 + `PSTATE_*` 常量，内核/用户共享 |
+| `kernel/psinfo.h` | `struct psinfo` 布局 + `PSTATE_*` / `PRIO_*` 常量，内核/用户共享（`_pad` 在批次 6 改为 `prio`，`sizeof` 不变） |
 | `kernel/minios.h` | `MINIOS_MEM_TOTAL` 等共享常量 |
 | `kernel/fsstat.h` | `struct fsstat` 布局（含 `nmeta` 元数据块数），内核/用户共享 |
 | `kernel/sysinfo.h` | `struct sysinfo` 布局，内核/用户共享 |
@@ -376,6 +411,7 @@ Numbers live in `kernel/syscall.h`, the dispatch table in `kernel/syscall.c`, th
 | `user/df.c` | 文件系统用量 |
 | `user/waitxtest.c` | 子进程 CPU 时间回收自检 |
 | `user/help.c` | 命令索引，标注每条命令的来源 |
+| `user/priotest.c` | 调度优先级与老化的自检程序 |
 
 ### 修改 / Modified
 
@@ -385,10 +421,10 @@ Numbers live in `kernel/syscall.h`, the dispatch table in `kernel/syscall.c`, th
 | `kernel/vm.c` | `vm_rss()` 驻留页统计（递归遍历三级页表）；`vmfaults()` 按需分页计数 |
 | `kernel/fs.c` | O(1) 块/inode 计数器；`fscount_scan()`、`fscount_walk()`、`fsinfo()`（含 `nmeta` 推导） |
 | `kernel/printk.c` | 无锁日志环形缓冲区；`kputc()` tee；`klog_read()` |
-| `kernel/proc.h` | `struct proc` 增加 `u_ticks` / `k_ticks` / `xutime` / `xktime` |
-| `kernel/proc.c` | `allocproc()` 清零计数；`psinfo()` 快照 + 编译期页大小断言；`cpu_online_inc()`/`ncpu_online()` |
+| `kernel/proc.h` | `struct proc` 增加 `u_ticks` / `k_ticks` / `xutime` / `xktime`；批次 6 增加 `prio` / `cur_prio`（受 `p->lock` 保护） |
+| `kernel/proc.c` | `allocproc()` 清零计数；`psinfo()` 快照 + 编译期页大小断言；`cpu_online_inc()`/`ncpu_online()`；批次 6 的 `scheduler()` 单遍择优 + 老化、`ksetprio()` |
 | `kernel/trap.c` | `clockintr()` 按 hart 计费并拆分为用户/内核态 |
-| `kernel/sysproc.c` | `sys_psinfo` / `sys_freemem` / `sys_klog` / `sys_sysinfo` |
+| `kernel/sysproc.c` | `sys_psinfo` / `sys_freemem` / `sys_klog` / `sys_sysinfo` / `sys_setprio` |
 | `kernel/main.c` | 每个 hart 进入 `scheduler()` 前调用 `cpu_online_inc()` |
 | `kernel/bio.c` | `bcache_hits` / `bcache_misses` 计数器与 `bio_stats()` |
 | `kernel/virtio_disk.c` | `disk_reads_cnt` / `disk_writes_cnt` 计数器与 `disk_stats()` |
@@ -507,6 +543,19 @@ waitxtest: OK
 
 `waitxtest` reads the same two counters through two independent paths: the child measures itself with `psinfo()` and reports over a pipe, while the parent reaps it with `waitx()`. They must agree within `TOLERANCE = 4` ticks, and only in one direction: the freeze happens after the child read itself, so the parent may see more, never less.
 
+**调度优先级 / Scheduler priorities**
+
+```sh
+$ priotest
+priotest: urgent (prio 0): user 18 sys 2
+priotest: slack  (prio 9): user 2 sys 0
+priotest: OK (urgent 18 vs slack 2 ticks)
+```
+
+（示意输出，具体数值随运行状态变化）紧急进程获得约 9 倍于松弛进程的 CPU，而松弛进程仍被老化保证运行 —— 两个断言缺一不可。
+
+`prio` 列可直接在 `ps` 里观察：新进程都是 `PRIO_DEFAULT`(5)，`setprio` 之后立即改变。若把 `PRIO_LOWEST` 调到很大的值（例如把范围改成 0..99），可以观察到松弛进程的等待轮数随之线性增长 —— 老化比例由范围宽度决定。
+
 **手动检查 / Manual checks**
 
 - `dmesg` 可回放内核启动日志；执行 `echo hello` 后再 `dmesg`，**不会**包含 `hello` —— 证明 tee 边界正确（用户态 `printf` 不属于内核日志）。实际上 `init: starting sh` 也不出现，因为那是用户程序输出。
@@ -519,6 +568,12 @@ waitxtest: OK
 
 ## 已知限制 / Known limitations
 
+- **调度器每 tick 做一次 O(NPROC) 全表扫描**：择优与老化合并后仍是一次完整遍历。`NPROC = 64` 下成本可忽略，但它确实比原先"遇到第一个 `RUNNABLE` 就走"更贵。
+  The scheduler walks the whole table every tick. At `NPROC = 64` the cost is negligible, but it is strictly more work than the old "run the first RUNNABLE slot found".
+- **优先级不继承**：`kfork()` 逐字段复制，子进程从 `PRIO_DEFAULT` 开始。若希望子进程继承父进程的优先级，需要显式调用 `setprio`。
+- **老化速率由优先级范围宽度决定**：低优先级进程每 `PRIO_LOWEST - PRIO_HIGHEST + 1` 轮被选中一次。这个比例不是独立参数 —— 改范围就等于改比例。
+- **`setprio` 无权限检查**：任何进程可以改任何进程的优先级（xv6 没有 uid/gid）。
+- **优先级范围刻意压窄（0..9）**：不同于 nice(1) 的 -20..19，窄范围让老化在可观测的时间内生效；代价是"优先级"只能表达一档粗略的差别。
 - **`psinfo()` 的成本随进程规模增长**：快照期间会对每个进程持 `p->lock` 遍历页表树，因此映射页很多的进程会让 `psinfo()` 变慢，而 `top` 每轮都要做一次。这里不能改成「先释放锁再遍历」——那样页表可能被并发释放；这是必要权衡，不是疏漏。
   `psinfo()` walks each process's page table while holding `p->lock`, so its cost grows with what is mapped and `top` pays it every refresh. It cannot drop the lock first, since the table could be torn down underneath it.
 
@@ -539,13 +594,12 @@ waitxtest: OK
 
 ## 路线图 / Roadmap
 
-已完成批次 1–5。批次 6 选定**调度器优先级**（含本项目第一个写型 syscall `setprio()`），选型理由与实施方案见 `docs/batch5-plan.md` 第 7 章。
+已完成批次 1–6。批次 6 的调度器优先级见本节之前那一节；批次 5 的选型讨论保留在 `docs/batch5-plan.md` 第 7 章。
 
-Batches 1-5 are complete. Batch 6 is slated for **scheduler priorities** (including `setprio()`, the first syscall in this project that writes kernel state); see `docs/batch5-plan.md` §7 for the rationale and the plan.
+Batches 1-6 are complete; see the batch 6 section above.
 
-- 批次 6：调度器优先级（带老化，避免饥饿）+ `setprio(pid, prio)`
-- 批次 7：`kalloc` 页状态数组（双重释放 / 泄漏检测）
-- 批次 8+：COW fork、信号投递、`/proc` 伪文件系统
+- 批次 7：`kalloc` 页状态数组（双重释放 / 泄漏检测）—— 仍属观测/调试设施，可留在当前分支
+- 批次 8+：COW fork、信号投递、`/proc` 伪文件系统 —— 均属机制类，各自另开分支
 
 ---
 

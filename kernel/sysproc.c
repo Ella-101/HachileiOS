@@ -7,6 +7,7 @@
 #include "proc.h"
 #include "vm.h"
 #include "sysinfo.h"
+#include "psinfo.h"
 
 uint64
 sys_exit(void)
@@ -207,4 +208,23 @@ sys_sysinfo(void)
   if (copyout(p->pagetable, p->sz, addr, (char *)&info, sizeof(info)) < 0)
     return -1;
   return 0;
+}
+
+// setprio(pid, prio): change a process scheduling priority.
+//
+// Smaller is more urgent; the range is PRIO_HIGHEST..PRIO_LOWEST from
+// kernel/psinfo.h.  This is the first syscall in this project that writes
+// kernel state rather than only observing it -- 23 through 28 are all
+// read-only.  There is no permission check (xv6 has no uid/gid); see the
+// comment on ksetprio() in proc.c.
+uint64
+sys_setprio(void)
+{
+  int pid, prio;
+
+  argint(0, &pid);
+  argint(1, &prio);
+  if (prio < PRIO_HIGHEST || prio > PRIO_LOWEST)
+    return -1;
+  return ksetprio(pid, prio);
 }

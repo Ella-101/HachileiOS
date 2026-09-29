@@ -50,7 +50,7 @@ static struct entry cmds[] = {
 
   {"processes", "ps", "",
    "snapshot the process table",
-   "Columns: pid ppid state vsz rss usr sys name; vsz/rss in KB.", 1},
+   "Columns: pid ppid state vsz rss usr sys prio name; vsz/rss in KB.", 1},
   {"processes", "top", "[refreshes]",
    "refresh the process table periodically",
    // Adjacent string literals concatenate, so this is still one
@@ -67,11 +67,11 @@ static struct entry cmds[] = {
    "Printed in bytes, KB and pages.", 1},
   {"system info", "df", "",
    "file system block and inode usage",
-   "`total' counts the whole image, metadata blocks included.", 1},
+   "Prints a whole-image and a data-block view; both share one free count.",
+   1},
   {"system info", "neofetch", "",
    "one-shot system overview",
-   "CPU count is the compile-time NCPU, not the number of online harts.",
-   1},
+   "Reports the online hart count, disk I/O and buffer-cache hits.", 1},
   {"system info", "dmesg", "",
    "replay the kernel log ring buffer",
    "Only what printk() emitted; user output is not captured.", 1},
@@ -82,6 +82,9 @@ static struct entry cmds[] = {
   {"self-checks", "waitxtest", "[ticks]",
    "cross-check waitx() against the child's own psinfo()",
    "Defaults to 5 ticks.  The parent may see more, never less.", 1},
+  {"self-checks", "priotest", "[ticks]",
+   "check that the scheduler honours priorities",
+   "Defaults to 20 ticks.  Also checks that aging prevents starvation.", 1},
 
   {"tests", "usertests", "[-q|-c|-C|testname]",
    "the full regression suite",

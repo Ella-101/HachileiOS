@@ -88,6 +88,8 @@ struct proc {
   int killed;           // If non-zero, have been killed
   int xstate;           // Exit status to be returned to parent's wait
   int pid;              // Process ID
+  int prio;             // scheduling priority: smaller is more urgent
+  int cur_prio;         // priority the scheduler compares; decays while waiting
 
   // Exit-time CPU accounting, to be returned to the parent's waitx().
   // Same convention as xstate: written under p->lock in kexit() before

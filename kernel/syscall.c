@@ -109,6 +109,7 @@ extern uint64 sys_klog(void);
 extern uint64 sys_waitx(void);
 extern uint64 sys_fsinfo(void);
 extern uint64 sys_sysinfo(void);
+extern uint64 sys_setprio(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -142,6 +143,7 @@ static uint64 (*syscalls[])(void) = {
   [SYS_waitx]   = sys_waitx,
   [SYS_fsinfo]  = sys_fsinfo,
   [SYS_sysinfo] = sys_sysinfo,
+  [SYS_setprio] = sys_setprio,
   // clang-format on
 };
 

@@ -11,6 +11,13 @@
 // Must equal sizeof(((struct proc *)0)->name) in kernel/proc.h.
 #define PINFO_NAME 16
 
+// Scheduling priority, in the spirit of nice(1): a smaller number is more
+// urgent.  The kernel clamps setprio() to this range, and the aging pass in
+// the scheduler keeps even PRIO_LOWEST from starving.
+#define PRIO_HIGHEST 0
+#define PRIO_LOWEST  9
+#define PRIO_DEFAULT 5
+
 // Mirror of enum procstate in kernel/proc.h.  Kept as plain #defines so
 // user code does not need to include kernel/proc.h (which drags in the
 // whole kernel process structure).
@@ -25,7 +32,7 @@ struct psinfo {
   int pid;               // process id
   int ppid;              // parent process id (0 if none)
   int state;             // one of the PSTATE_* values above
-  int _pad;              // explicit padding; keeps sz 8-byte aligned
+  int prio;              // scheduling priority, smaller is more urgent
   uint64 sz;             // virtual memory size in bytes, NOT resident set size
   uint64 rss;            // resident set size in bytes (pages actually mapped)
   uint64 u_ticks;        // timer ticks charged while in user mode

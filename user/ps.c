@@ -33,7 +33,7 @@ main(int argc, char *argv[])
     exit(1);
   }
 
-  printf("pid  ppid state  vsz  rss  usr sys name\n");
+  printf("pid  ppid state  vsz  rss  usr sys prio name\n");
   for (i = 0; i < n; i++) {
     struct psinfo *pi = &psinfos[i];
     if (pi->state >= 0 && pi->state < sizeof(states) / sizeof(states[0]) &&
@@ -43,9 +43,9 @@ main(int argc, char *argv[])
       state = "???";
     // vsz is what sbrk handed out, rss is what actually got mapped; with
     // lazy allocation the two drift apart until the pages are touched.
-    printf("%d  %d  %s  %d  %ld  %d  %d  %s\n", pi->pid, pi->ppid, state,
+    printf("%d  %d  %s  %d  %ld  %d  %d  %d  %s\n", pi->pid, pi->ppid, state,
            (int)(pi->sz / 1024), pi->rss / 1024, (int)pi->u_ticks,
-           (int)pi->k_ticks, pi->name);
+           (int)pi->k_ticks, pi->prio, pi->name);
   }
   printf("(vsz/rss are KB, usr/sys are timer ticks, 1 tick = 100 ms)\n");
 
