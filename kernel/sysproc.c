@@ -6,6 +6,8 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "vm.h"
+#include "sysinfo.h"
+#include "psinfo.h"
 
 uint64
 sys_exit(void)
@@ -175,4 +177,69 @@ sys_klog(void)
     return -1;
 
   return n;
+}
+
+// sysinfo(info): snapshot of the system-wide counters.
+//
+// The fields are read one at a time rather than under a single lock, so
+// this is not an atomic view of the machine: by the time the last counter
+// is read the first ones may already be stale.  That is deliberate --
+// these are monotonic statistics, and a consistent snapshot would mean
+// stopping every hart.
+uint64
+sys_sysinfo(void)
+{
+  uint64 addr;
+  struct sysinfo info;
+  struct proc *p = myproc();
+
+  argaddr(0, &addr);
+
+  info.ncpu_online = ncpu_online();
+  info.ncpu_max = NCPU;
+  // Same quantity as MINIOS_MEM_TOTAL in minios.h; derived here from
+  // memlayout.h so there is only one place to keep in sync.
+  info.mem_total = PHYSTOP - KERNBASE;
+  info.mem_free = freemem();
+  kalloc_stats(&info.pages_total, &info.pages_live, &info.alloc_calls);
+  bio_stats(&info.bcache_hits, &info.bcache_misses);
+  disk_stats(&info.disk_reads, &info.disk_writes);
+  info.vmfaults = vmfaults();
+  info.pages_shared = kshared();
+  // The O(1) counter and its O(N) reference are returned from the one call,
+  // read back to back, so that comparing them is meaningful: a second
+  // syscall would put more time between the two readings.  They are still
+  // two reads rather than one atomic snapshot, so a fork on another hart in
+  // between them can make the two differ by a page; the comparison is exact
+  // when the caller is the only process running, which is what cowtest sets
+  // up.  The walk costs O(NPAGE) while holding kmem.lock -- 32 KiB of table
+  // to scan -- which is the price of having the cross-check at all; only
+  // the three programs that call sysinfo() pay it.
+  info.pages_shared_ref = kshared_walk();
+  info.kref_calls = krefs();
+  info.cow_faults = cowfaults();
+  info.cow_copies = cowcopies();
+
+  if (copyout(p->pagetable, p->sz, addr, (char *)&info, sizeof(info)) < 0)
+    return -1;
+  return 0;
+}
+
+// setprio(pid, prio): change a process scheduling priority.
+//
+// Smaller is more urgent; the range is PRIO_HIGHEST..PRIO_LOWEST from
+// kernel/psinfo.h.  This is the first syscall in this project that writes
+// kernel state rather than only observing it -- 23 through 28 are all
+// read-only.  There is no permission check (xv6 has no uid/gid); see the
+// comment on ksetprio() in proc.c.
+uint64
+sys_setprio(void)
+{
+  int pid, prio;
+
+  argint(0, &pid);
+  argint(1, &prio);
+  if (prio < PRIO_HIGHEST || prio > PRIO_LOWEST)
+    return -1;
+  return ksetprio(pid, prio);
 }

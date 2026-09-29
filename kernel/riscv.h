@@ -398,6 +398,11 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define PTE_X (1L << 3)
 #define PTE_U (1L << 4) // user can access
 
+// Sv39 leaves PTE bits 8 and 9 to software.  A copy-on-write fork sets
+// PTE_COW on a page it has shared and clears PTE_W, so that the first store
+// by either process traps and cowfault() can hand it a private copy.
+#define PTE_COW (1L << 8)
+
 // shift a physical address to the right place for a PTE.
 #define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)
 

@@ -51,22 +51,25 @@ The default QEMU invocation (from the `Makefile`) is `-m 128M -smp 3`.
 | `free` | 物理内存总量 / 已用 / 空闲 |
 | `dmesg` | 回放内核日志环形缓冲区 |
 | `top [n]` | 周期性刷新进程表 + CPU 增量（默认 10 次） |
-| `neofetch` | 一次性系统概览 |
+| `neofetch` | 一次性系统概览（含在线 hart 数、磁盘 I/O） |
 | `cputest [ticks]` | CPU 时间统计的自检程序（默认累计 20 tick） |
 | `df` | 文件系统用量（块 / inode） |
 | `waitxtest [ticks]` | 子进程 CPU 时间回收的自检程序（默认 5 tick） |
 | `help [command]` | 命令索引；列出可用命令并标注是 xv6 原版还是 miniOS 新增 |
+| `priotest [ticks]` | 调度优先级与老化的自检程序（默认各跑 20 tick） |
+| `kmemtest` | 分配器会计与泄漏的自检程序 |
+| `cowtest` | 写时复制 fork 的自检程序（共享代价、写隔离、copyout 与三代共享）|
 
-镜像里共有 **29** 个用户程序（即 `UPROGS` 的 29 项）。不带参数运行 `help` 会按类别列出其中 **28 条**——除 `help` 自身以外的全部命令——并把 miniOS 新增的 8 条用 `*` 标出；`help ps` 则只显示该命令的用法与补充细节。`help` 本身是 miniOS 的第 9 个新增程序，没有把自己列进索引（一个刻意的取舍），但它与其他命令一样只是根目录里的普通程序，`ls` 能看到它。xv6 的 shell 没有内建命令，因此命令索引本身也只能是一个普通程序。
+镜像里共有 **32** 个用户程序（即 `UPROGS` 的 32 项）。不带参数运行 `help` 会按类别列出其中 **31 条**——除 `help` 自身以外的全部命令——并把 miniOS 新增的 11 条用 `*` 标出；`help ps` 则只显示该命令的用法与补充细节。`help` 本身是 miniOS 的第 12 个新增程序，没有把自己列进索引（一个刻意的取舍），但它与其他命令一样只是根目录里的普通程序，`ls` 能看到它。xv6 的 shell 没有内建命令，因此命令索引本身也只能是一个普通程序。
 
-The image holds **29** user programs (the 29 `UPROGS` entries). Run with no arguments, `help` lists **28** of them grouped by category — every command except `help` itself — marking the 8 added by this project with `*`; `help ps` shows just that entry. `help` is itself the 9th program this project added; it deliberately does not index itself, but it is otherwise an ordinary program in the root directory, visible to `ls`. xv6's shell has no built-ins, so the index has to be an ordinary program too.
+The image holds **32** user programs (the 32 `UPROGS` entries). Run with no arguments, `help` lists **31** of them grouped by category — every command except `help` itself — marking the 11 added by this project with `*`; `help ps` shows just that entry. `help` is itself the 11th program this project added; it deliberately does not index itself, but it is otherwise an ordinary program in the root directory, visible to `ls`. xv6's shell has no built-ins, so the index has to be an ordinary program too.
 
 ```
 $ ps
-pid  ppid state  vsz  rss  usr sys name
-1  0  sleep  16  16  0  0  init
-2  1  sleep  20  20  0  0  sh
-3  2  run  20  20  0  0  ps
+pid  ppid state  vsz  rss  usr sys prio name
+1  0  sleep  16  16  0  0  5  init
+2  1  sleep  20  20  0  0  5  sh
+3  2  run  20  20  0  0  5  ps
 (vsz/rss are KB, usr/sys are timer ticks, 1 tick = 100 ms)
 ```
 
@@ -92,6 +95,13 @@ In the default build both `exec()` and the `sbrk()` library call allocate eagerl
 | 4 | 子进程 CPU 时间回收 / Child CPU accounting | `waitx()` (26) → `waitxtest` | ✅ 已验证 |
 | 4 | 文件系统用量 / File system usage | `fsinfo()` (27) → `df` | ✅ 已验证 |
 | 4 | 命令索引 / Command index | `help` | ✅ 已验证 |
+| 5 | 数据块口径 / Data-block view | `fsinfo` 扩展字段 → `df` | ✅ 已验证 |
+| 5 | 运行时在线 hart 数 / Online hart count | `sysinfo()` (28) → `neofetch` | ✅ 已验证 |
+| 5 | 磁盘 I/O 与缓存命中 / Disk I/O & cache hits | `sysinfo()` (28) → `neofetch` | ✅ 已验证 |
+| 5 | 按需分页计数 / Demand paging count | `sysinfo()` (28) → `neofetch` | ✅ 已验证 |
+| 6 | 调度器优先级 / Scheduler priorities | `setprio()` (29) → `ps` / `priotest` | ✅ 已验证 |
+| 7 | 页状态表与分配器自检 / Per-page state table | `kalloc_stats()` → `sysinfo` (28) → `kmemtest` | ✅ 已验证 |
+| 8 | 写时复制 fork / Copy-on-write fork | `kref()`/`kfree()` 引用计数 → `cowfault()` → `cowtest` | ✅ 已验证 |
 
 ---
 
@@ -290,6 +300,122 @@ Three decisions worth spelling out:
 
 ---
 
+### 批次 5 — 系统信息与运行时计数器 / Batch 5 — System info & runtime counters
+
+批次 5 先补齐批次 4 遗留的两个口径问题（`df` 的元数据口径、编译期 hart 数），再把新增的**事件计数**统一到一个系统调用下。
+
+Batch 5 closed the two gaps batch 4 left open (the metadata figure in `df`, the compile-time hart count), then funnelled the new *event* counters through a single call.
+
+**`sysinfo()` 系统调用（`SYS_sysinfo = 28`）**
+
+- 原型 / Prototype: `int sysinfo(struct sysinfo *info);` —— 布局在共享头 `kernel/sysinfo.h`。
+- 与 `struct psinfo` 的关键差别：它是**单个结构体而非进程表快照**，因此**没有页大小约束**，可以随时追加字段。
+  Unlike `struct psinfo` this is a single struct, not a process-table snapshot, so it carries **no page-size constraint** and fields can be appended freely.
+
+| 字段 / Field | 来源 / Source |
+| --- | --- |
+| `ncpu_online` | 每个 hart 进入 `scheduler()` 前自增的计数器（`kernel/proc.c`） |
+| `ncpu_max` | 编译期上限 `NCPU` |
+| `mem_total` / `mem_free` | `PHYSTOP - KERNBASE` / `freemem()` |
+| `disk_reads` / `disk_writes` | `virtio_disk_rw()` 入口，按读写分流（`kernel/virtio_disk.c`） |
+| `bcache_hits` / `bcache_misses` | `bget()` 命中分支 / 需要取空槽的分支（`kernel/bio.c`） |
+| `vmfaults` | `vmfault()` 中 `mappages()` 成功之后（`kernel/vm.c`） |
+
+- **所有计数器都是 relaxed atomic，理由相同**：计数点已经在各自的临界区内（`bget()` 在 `bcache.lock` 内），而读者只要一个单调快照，在此加锁只会引入锁序反转风险。
+  Every counter is a relaxed atomic for the same reason: the increment sites already sit inside their own critical section, and a reader only wants a monotonic snapshot.
+- **`vmfaults` 计在成功映射之后**，因此它等于"新映射的页数"，可以直接与 `rss` 的增长对照；计在函数入口则会把 `va >= psz` 与 `ismapped()` 这两种无效调用也算进去。
+  Counting after `mappages()` succeeds makes the figure mean "pages newly mapped", comparable against the growth of `rss`.
+- **`ncpu_online` 报的是"已进入调度器"的 hart 数**，不是 `-smp` 配置值：hart 0 因先完成设备初始化而最后到达。观测真实在线比回显一个编译期常量更有价值。
+  `ncpu_online` counts harts that have *reached the scheduler*, not the `-smp` setting; hart 0 arrives last because it performs all device setup first.
+
+**`nmeta`：`df` 的数据块口径 / A data-block view for `df`**
+
+`struct fsstat` 增加 `nmeta`，由 `fsinfo()` 用 `sb.size - sb.nblocks` 得出 —— 这正是 mkfs 自己的算法（`nblocks = FSSIZE - nmeta`），复用它比在核心里重算 inode 块与位图块数更不容易漂移。`df` 现在同时打印"整盘"与"数据块"两组读数。
+
+  `struct fsstat` gained `nmeta`, derived as `sb.size - sb.nblocks` — exactly how mkfs splits the image — and `df` prints both the whole-image and data-block views.
+
+> 两种口径的 `free` 值必然相同：元数据块在同一张位图里被标记为已用，空闲块不可能落在元数据区。这不是打印错误。
+> The two views must agree on `free`: metadata blocks are marked allocated in the same bitmap, so no free block can lie there.
+
+**验证上的一个新情况 / A new verification situation**
+
+`disk_reads` / `bcache_hits` 这类**事件计数没有可扫描的 O(N) 真值**，因此无法沿用 `freemem_walk()` / `fscount_walk()` 那套对照法，只能靠同层恒真不变式（`hits + misses == bget()` 调用次数）与行为对照。这是本项目首个无法用参考实现校验的能力。
+
+  These event counters have no scanable O(N) ground truth, so the `freemem_walk()` / `fscount_walk()` cross-check does not apply. Same-layer invariants and behavioural comparison are all there is.
+
+---
+
+
+### 批次 6 — 调度器优先级 / Batch 6 — Scheduler priorities
+
+批次 5 为止，本项目新增的每一个系统调用都是**只读**的。批次 6 引入第一个**写型**系统调用，并第一次改动调度语义 —— 这使它不同于前面所有批次：观测能力只读内核状态，随时可以整体回滚；而调度策略会改变每一个进程的运行机会。
+
+Until batch 6 every syscall this project added was read-only. Batch 6 adds the first one that writes kernel state, and the first change to scheduling semantics.
+
+**`setprio()` 系统调用（`SYS_setprio = 29`）**
+
+- 原型 / Prototype: `int setprio(int pid, int prio);` —— **数值越小越紧急**，范围 `PRIO_HIGHEST`(0)..`PRIO_LOWEST`(9)，常量定义在共享头 `kernel/psinfo.h`。
+- **无权限检查**：xv6 没有 uid/gid，任何进程都可以修改任何进程的优先级。这是显式记录的教学简化。
+  There is no permission check — xv6 has no uid/gid, so any process may change any other process's priority. A stated teaching simplification.
+- **fork 不继承优先级**：`kfork()` 是逐字段复制而非 `*np = *p`，所以新进程从 `PRIO_DEFAULT`(5) 开始。这让"每个进程起点平等"成为可预测的语义，也让优先级只能通过显式 `setprio` 改变。
+
+**调度器：单遍择优 + 老化 / One-pass choose-and-age**
+
+`struct proc` 增加两个字段：`prio`（静态，由用户设置）与 `cur_prio`（动态，调度器实际比较的值）。`scheduler()` 从"取第一个 `RUNNABLE`"改为"取 `cur_prio` 最小者"，并在**同一次扫描**中给每个仍可运行却未被选中的进程把 `cur_prio` 减一 —— 这就是老化。
+
+被选中的进程在切换前把 `cur_prio` 重置回 `prio`：稳态下高优先级进程每轮都赢，而低优先级进程的 `cur_prio` 持续下降，因此每 `PRIO_LOWEST - PRIO_HIGHEST + 1 = 10` 轮必然被选中一次 —— **这是不饥饿的保证，也是"优先级"与"饿死"之间的分界线**。`PRIO_AGING_FLOOR` 防止计数器在长时间运行后向 `INT_MIN` 漂移。
+
+三个值得写下来的工程决定 / Three engineering points:
+
+1. **为什么老化不是可选项**：`kernel/trap.c` 每个 tick 都调用 `yield()`，因此调度器每 tick 重新择优。纯静态优先级意味着低优先级进程只能在高优先级进程全部阻塞时才运行 —— 在 `usertests` 那种并发子进程密集的负载下，这会直接表现为间歇性失败。
+2. **择优与老化合并成一遍**：唯一后果是"被选中者自己也被减了一"，而它在切换前会被重置，所以结果与两遍扫描等价，却省掉一次 O(NPROC) 遍历。
+3. **`best` 指针必须重新校验**：`proc` 数组是静态的，指针始终有效；但选中后必须**重新持锁确认 `state == RUNNABLE`** —— 该进程可能在这一遍扫描期间睡眠、退出，甚至其槽位已被回收复用。这是 `scheduler()` 里唯一容易写错的地方。
+
+**自检 / Self-check**
+
+`priotest` 让两个子进程各在用户态自旋相同的 tick 数，父进程把其中一个设为最紧急、另一个设为最松弛，再用 `waitx()` 比较两者的 CPU 时间。它同时断言两件事：紧急进程必须明显领先（优先级生效），且松弛进程必须拿到 CPU（老化生效）。**只看前者无法区分"调度正确"与"低优先级被饿死"。**
+
+---
+
+
+### 批次 7 — 页状态表与分配器自检 / Batch 7 — Per-page state table & allocator self-check
+
+`kalloc()` 原有的防护只看**参数**：指针是否页对齐、是否落在 `[end, PHYSTOP)` 之内。它看不见**所有权**错误 —— 同一页被 `kfree()` 两次时，该页会被同一张空闲链表串两次，之后 `kalloc()` 会把同一块内存交给两个不同的调用者，而现场毫无提示。批次 7 用一张每页 1 字节的状态表，把这种静默损坏变成即时 `panic`。
+
+The existing checks in `kalloc()` only validate the *argument*: page alignment and range. They cannot see an *ownership* error -- freeing the same page twice splices it into the free list twice, so a later `kalloc()` hands the same memory to two different callers, silently.
+
+**状态表 / The state table**（`kernel/kalloc.c`）
+
+- `page_state[NPAGE]`，其中 `NPAGE = (PHYSTOP - KERNBASE) / PGSIZE` = 32768，即 **32 KiB**。
+- 只有两个取值：`PAGE_FREE`（在空闲链表上）与 `PAGE_ALLOC`（已交出、未归还）。
+- 两侧互为镜像：`kfree()` 要求当前是 `PAGE_ALLOC`，`kalloc()` 要求取出的页是 `PAGE_FREE`；任一不符即 `panic`。
+- **成本与取舍**：32 KiB 是被描述内存的 0.025%。这是**调试设施**，生产内核不需要它 —— 保留它是本项目的刻意选择，换取"双重释放导致链表损坏"从静默故障变成立即停机。
+- **不需要原子操作**：`page_state` 只在持有 `kmem.lock` 时被读写（`kalloc()`/`kfree()` 本就在锁内操作链表），因此它不引入新的同步开销。
+- `kinit()` 先把整张表置为 `PAGE_ALLOC` 再调用 `freerange()`：于是"释放一个从未分配过的页"就只剩 `kinit` 自己这一次**合法**的 `ALLOC→FREE` 迁移，不必在 `kfree()` 里开特例。
+
+**计数器与自检 / Counters and self-check**
+
+`kmem` 增加 `kalloc_calls` / `kfree_calls` 两个累计计数，`kinit()` 在 `freerange()` 之后清零，所以差值表示"自启动以来交出的页数"。`kalloc_stats()` 经 `sysinfo()` 导出三个新字段：
+
+| 字段 / Field | 含义 / Meaning |
+| --- | --- |
+| `pages_total` | 全部物理页 = 32768，**含**从不归 `kalloc` 管的内核映像页 |
+| `pages_live` | 已交出未归还的页数 = `kalloc_calls - kfree_calls` |
+| `alloc_calls` | 累计 `kalloc()` 成功次数 |
+
+`kmemtest` 交叉检查**两条互相独立**的会计路径：
+
+1. **守恒律**：`mem_free`（来自 O(1) 的 `nfree` 计数）与 `pages_live`（来自调用计数）之和是一个常量 —— `nfree + live` 恒等于内核映像之后的页数 —— 所以分配前后必须完全不变。
+2. **泄漏检测**：子进程 `sbrk` 64 页后退出，`pages_live` 必须回落到基线（容差 4 页）。
+
+> ⚠️ 守恒律只能用**增量**判断，不能写成 `pages_live == pages_total - pages_free`：`pages_total` 含内核映像页而 `nfree` 不含，两者起点不同。这是本批次最容易写错的一处，`kmemtest.c` 的注释里也写明了。
+> The invariant only holds for *deltas*: `pages_total` includes the kernel image pages while `nfree` does not, so an absolute equality would be wrong.
+
+**无法从用户态测试的部分 / What cannot be tested from user space**：双重释放检测会 `panic`，触发即整机停机，所以它只能靠代码审查与"临时改坏一处再跑"来验证。
+
+---
+
+
 ## 新增系统调用 / New system calls
 
 | 编号 | 名称 | 用户态原型 | 返回 |
@@ -299,6 +425,8 @@ Three decisions worth spelling out:
 | 25 | `SYS_klog` | `int klog(char *buf, int max, uint64 *seq, uint64 *lost)` | 复制字节数，或 `-1` |
 | 26 | `SYS_waitx` | `int waitx(int *status, uint64 *utime, uint64 *ktime)` | 子进程 pid，或 `-1` |
 | 27 | `SYS_fsinfo` | `int fsinfo(struct fsstat *st)` | `0`，或 `-1` |
+| 28 | `SYS_sysinfo` | `int sysinfo(struct sysinfo *info)` | `0`，或 `-1` |
+| 29 | `SYS_setprio` | `int setprio(int pid, int prio)` | `0`，或 `-1` |
 
 编号定义在 `kernel/syscall.h`，分发表在 `kernel/syscall.c`，实现在 `kernel/sysproc.c`，用户桩由 `user/usys.pl` 生成。
 
@@ -312,9 +440,10 @@ Numbers live in `kernel/syscall.h`, the dispatch table in `kernel/syscall.c`, th
 
 | 文件 | 说明 |
 | --- | --- |
-| `kernel/psinfo.h` | `struct psinfo` 布局 + `PSTATE_*` 常量，内核/用户共享 |
+| `kernel/psinfo.h` | `struct psinfo` 布局 + `PSTATE_*` / `PRIO_*` 常量，内核/用户共享（`_pad` 在批次 6 改为 `prio`，`sizeof` 不变） |
 | `kernel/minios.h` | `MINIOS_MEM_TOTAL` 等共享常量 |
-| `kernel/fsstat.h` | `struct fsstat` 布局，内核/用户共享 |
+| `kernel/fsstat.h` | `struct fsstat` 布局（含 `nmeta` 元数据块数），内核/用户共享 |
+| `kernel/sysinfo.h` | `struct sysinfo` 布局，内核/用户共享 |
 | `user/ps.c` | 进程列表 |
 | `user/free.c` | 内存用量 |
 | `user/dmesg.c` | 内核日志回放 |
@@ -324,23 +453,31 @@ Numbers live in `kernel/syscall.h`, the dispatch table in `kernel/syscall.c`, th
 | `user/df.c` | 文件系统用量 |
 | `user/waitxtest.c` | 子进程 CPU 时间回收自检 |
 | `user/help.c` | 命令索引，标注每条命令的来源 |
+| `user/priotest.c` | 调度优先级与老化的自检程序 |
+| `user/kmemtest.c` | 分配器会计（守恒律）与泄漏的自检程序 |
+| `user/cowtest.c` | 写时复制 fork 的自检程序：fork 代价、写隔离、copyout、三代共享 |
 
 ### 修改 / Modified
 
 | 文件 | 改动 |
 | --- | --- |
-| `kernel/kalloc.c` | `kmem.nfree` O(1) 计数器；`freemem()`、`freemem_walk()` |
-| `kernel/vm.c` | `vm_rss()` 驻留页统计（递归遍历三级页表） |
-| `kernel/fs.c` | O(1) 块/inode 计数器；`fscount_scan()`、`fscount_walk()`、`fsinfo()` |
+| `kernel/kalloc.c` | `kmem.nfree` O(1) 计数器；`freemem()`、`freemem_walk()`；批次 7 的每页状态表，批次 8 改为**引用计数**并新增 `kref()`/`krefcnt()`/`kshared()`/`kshared_walk()`/`krefs()`；`kalloc_stats()` |
+| `kernel/vm.c` | `vm_rss()` 驻留页统计（递归遍历三级页表）；`vmfaults()` 按需分页计数；批次 8 的写时复制 `uvmcopy()`、`cowfault()` 与 `copyout()` 的 COW 分支 |
+| `kernel/fs.c` | O(1) 块/inode 计数器；`fscount_scan()`、`fscount_walk()`、`fsinfo()`（含 `nmeta` 推导） |
 | `kernel/printk.c` | 无锁日志环形缓冲区；`kputc()` tee；`klog_read()` |
-| `kernel/proc.h` | `struct proc` 增加 `u_ticks` / `k_ticks` / `xutime` / `xktime` |
-| `kernel/proc.c` | `allocproc()` 清零计数；`psinfo()` 快照 + 编译期页大小断言 |
-| `kernel/trap.c` | `clockintr()` 按 hart 计费并拆分为用户/内核态 |
-| `kernel/sysproc.c` | `sys_psinfo` / `sys_freemem` / `sys_klog` |
+| `kernel/proc.h` | `struct proc` 增加 `u_ticks` / `k_ticks` / `xutime` / `xktime`；批次 6 增加 `prio` / `cur_prio`（受 `p->lock` 保护） |
+| `kernel/proc.c` | `allocproc()` 清零计数；`psinfo()` 快照 + 编译期页大小断言；`cpu_online_inc()`/`ncpu_online()`；批次 6 的 `scheduler()` 单遍择优 + 老化、`ksetprio()` |
+| `kernel/trap.c` | `clockintr()` 按 hart 计费并拆分为用户/内核态；批次 8 在 `usertrap()` 里接上写时复制缺页 |
+| `kernel/riscv.h` | `PTE_COW`：Sv39 留给软件的 PTE 位 8 |
+| `kernel/sysinfo.h` | `struct sysinfo`；批次 8 追加 5 个共享 / COW 字段 |
+| `kernel/sysproc.c` | `sys_psinfo` / `sys_freemem` / `sys_klog` / `sys_sysinfo` / `sys_setprio` |
+| `kernel/main.c` | 每个 hart 进入 `scheduler()` 前调用 `cpu_online_inc()` |
+| `kernel/bio.c` | `bcache_hits` / `bcache_misses` 计数器与 `bio_stats()` |
+| `kernel/virtio_disk.c` | `disk_reads_cnt` / `disk_writes_cnt` 计数器与 `disk_stats()` |
 | `kernel/syscall.h` / `.c` | 新系统调用编号与分发表 |
 | `kernel/defs.h` | 新函数原型 |
 | `user/user.h` / `usys.pl` | 新系统调用声明与桩 |
-| `Makefile` | `UPROGS` 增加 9 个用户程序（`ps` / `free` / `dmesg` / `top` / `neofetch` / `cputest` / `df` / `waitxtest` / `help`） |
+| `Makefile` | `UPROGS` 增加 12 个用户程序（`ps` / `free` / `dmesg` / `top` / `neofetch` / `cputest` / `df` / `waitxtest` / `help` / `priotest` / `kmemtest` / `cowtest`） |
 
 ---
 
@@ -397,10 +534,12 @@ Every tick is charged exactly once, so `user + sys == elapsed`.
 
 ```sh
 $ df
-         total        used        free
-blocks  2000  1328  672
-bytes   2048000  1359872  688128
-66% of the image is in use (1024-byte blocks)
+              total  used  free
+image  blocks  2000  1328  672
+       bytes   2048000  1359872  688128
+data   blocks  1953  1281  672
+       bytes   1999872  1311744  688128
+66% of the image is in use; 47 blocks are metadata
 inodes  200 total, 32 used, 168 free
 ```
 
@@ -408,9 +547,32 @@ inodes  200 total, 32 used, 168 free
 
 These are the numbers for a freshly built image after its first boot: of the 1328 used blocks, 47 are metadata marked by mkfs (boot/super/log/inode/bitmap) and the other 1281 hold `README` and the 29 user programs.
 
+`nmeta` comes straight from the superblock: mkfs sets `nblocks = size - nmeta`, so the kernel derives it as `sb.size - sb.nblocks` instead of re-deriving the inode and bitmap block counts, which would drift if either constant changed.
+
+两种口径共享同一个 free 值：元数据块全部标记为已用，空闲块不可能落在元数据区，所以“整盘”与“数据块”两种视角下的 free 必定相同——这不是打印错误。
+
 O(1) 计数器的正确性靠对照 O(N) 参考实现来校验：在内核里临时把 `fsinfo()` 改为调用 `fscount_walk()`，在同一次启动后两者必须完全一致（实测两侧都是 `1328` 块 / `32` inode）。这与批次 1 用 `freemem_walk()` 校验 `freemem()` 的做法相同。
 
 Validate the O(1) counters the same way batch 1 validated `freemem()`: temporarily make `fsinfo()` call `fscount_walk()` instead; on the same boot the two must agree exactly (measured: both report 1328 blocks / 32 inodes).
+
+**系统信息 / System summary**
+
+```sh
+$ neofetch
+   cpus      : 3 online of 8 max
+   memory    : 128 MB total, 118000 KB free
+   disk      : 412 block reads, 8 writes
+   bcache    : 61 hits, 57 misses
+   vmfaults  : 0
+```
+
+（示意输出，数值随运行状态变化）
+`ncpu_online` 由每个 hart 在进入 `scheduler()` 前自增一次，因此它报的是**实际在调度**的 hart 数，而不是编译期上限 `NCPU`；用 `make qemu CPUS=1` 与 `CPUS=4` 各跑一次即可验证读数随之变化。
+
+`disk_stats()` 计的是 `virtio_disk_rw()` 的真实传输次数，`bio_stats()` 计的是 `bget()` 的逻辑访问是否命中，两者的差额正是缓冲缓存省下的 I/O。**这一项没有 O(N) 参考实现可对照**（事件计数不存在可扫描的真值），只能靠同层恒真不变式（`hits + misses == bget()` 调用次数）与行为对照来验证。
+
+Validate the cache counters through their same-layer invariants instead of an O(N) walk: `bcache_hits + bcache_misses` must equal the number of `bget()` calls, and `disk_reads + disk_writes` must equal the number of `virtio_disk_rw()` calls. Run `ls` twice and the second run should add cache hits with almost no disk reads.
+
 
 **子进程 CPU 时间回收 / Child CPU reaping**
 
@@ -427,6 +589,38 @@ waitxtest: OK
 
 `waitxtest` reads the same two counters through two independent paths: the child measures itself with `psinfo()` and reports over a pipe, while the parent reaps it with `waitx()`. They must agree within `TOLERANCE = 4` ticks, and only in one direction: the freeze happens after the child read itself, so the parent may see more, never less.
 
+**调度优先级 / Scheduler priorities**
+
+```sh
+$ priotest
+priotest: urgent (prio 0): user 18 sys 2
+priotest: slack  (prio 9): user 2 sys 0
+priotest: OK (urgent 18 vs slack 2 ticks)
+```
+
+（示意输出，具体数值随运行状态变化）紧急进程获得约 9 倍于松弛进程的 CPU，而松弛进程仍被老化保证运行 —— 两个断言缺一不可。
+
+`prio` 列可直接在 `ps` 里观察：新进程都是 `PRIO_DEFAULT`(5)，`setprio` 之后立即改变。若把 `PRIO_LOWEST` 调到很大的值（例如把范围改成 0..99），可以观察到松弛进程的等待轮数随之线性增长 —— 老化比例由范围宽度决定。
+
+**分配器自检 / Allocator self-check**
+
+```sh
+$ kmemtest
+kmemtest: pages total 32768, live 118, alloc calls 4210
+kmemtest: mem total 131072 KB, free 132763 KB
+kmemtest: conserved quantity is 133152768 bytes (free 32512 pages + live)
+kmemtest: counters agree, 64 pages allocated and returned
+kmemtest: round 1: live 118 -> 118 after 5 children
+kmemtest: round 2: live 119 -> 119 after 5 children
+kmemtest: round 3: live 119 -> 119 after 5 children
+kmemtest: OK (conserved, no leak over 3 rounds)
+```
+
+（示意输出，具体数值随运行状态变化）第 3 行是守恒量：`mem_free + pages_live × 4096`，它来自两条互不相干的会计路径，因此它保持不变才算两条路径一致。
+
+**双重释放检测的手工验证 / Exercising the double-free check**：把 `kfree()` 的调用临时改成对同一页释放两次（例如在 `proc_freepagetable()` 之后再加一次 `kfree`），启动后应立刻看到
+`panic: kfree: page was not allocated (double free?)`。这一步**不能**放进 `kmemtest`，因为它会停机。
+
 **手动检查 / Manual checks**
 
 - `dmesg` 可回放内核启动日志；执行 `echo hello` 后再 `dmesg`，**不会**包含 `hello` —— 证明 tee 边界正确（用户态 `printf` 不属于内核日志）。实际上 `init: starting sh` 也不出现，因为那是用户程序输出。
@@ -434,24 +628,105 @@ waitxtest: OK
 - 环形缓冲区溢出路径：临时把 `KLOGSIZE` 改成 16，`dmesg` 会打印 `[dmesg: N bytes of older log were overwritten]`，数值与 `总字节数 − 保留字节数` 精确吻合。
   Overrun path: with `KLOGSIZE` temporarily set to 16, `dmesg` reports exactly `total log bytes − retained bytes` as overwritten.
 - 后台跑 `cputest 200 &` 时 `top` 显示其 `dcpu` 接近满格、`busy% 100`，而 `init` / `sh` 为 0。
-
+- `cowtest` 期望末行 `OK`。三处值得看：`fork cost` 必须远小于 32 页（复制式 fork 会是 32 页以上）；`shared` 在 fork 期间上升、子进程退出后回到 0；`store faults` 与 `needed a copy` 的差值就是"对方已退出、省掉一次拷贝"的次数。
+- 批次 8 验证时的实测读数：`fork cost 10 pages for 32 resident pages (36 shared)`；`141 store faults, 72 of them needed a copy`，差值 69 即被"独占页免拷贝"快捷路径省下的拷贝次数；`neofetch` 稳态下 `sharing` 为 0（fork+exec 的必然结果）而 `refs` 持续增长。
+  Recorded when batch 8 was verified: `fork cost 10 pages for 32 resident pages (36 shared)`, and `141 store faults of which only 72 needed a copy` -- the other 69 were spared by the single-reference fast path.
+  `cowtest` should end with `OK`. Three things to look at: `fork cost` must be far below 32 pages; `shared` rises during a fork and returns to 0 once the child exits; and the gap between `store faults` and `needed a copy` is the number of stores spared a copy because the other side had exited.
+- 手动确认 `copyout` 那条路径：临时把 `copyout()` 里的 `PTE_COW` 分支改成 `return -1`，`cowtest` 的第 3 项必须失败（子进程 `read` 报错），因为内核拒绝写共享页而不是取一份私有副本。
+  To confirm the `copyout` path by hand, make that branch return -1: `cowtest` must fail at its third check, since the kernel would then refuse to write a shared page instead of taking a private copy.
+- 双重释放仍然只能靠审查验证：现在要在有子进程共享页的情况下手动 `kfree()` 同一页，会得到 `panic: kfree: page is already free (double free?)`。
+  Double free is still review-only: freeing a page twice -- now including a page a child shares -- panics with `kfree: page is already free (double free?)`.
 ---
 
+### 批次 8 — 写时复制 fork / Batch 8 — Copy-on-write fork
+
+原先的 `uvmcopy()` 在 fork 时逐页 `kalloc` + `memmove`：父进程有多少页，fork 就复制多少页。批次 8 让 fork 改为**共享父进程的物理页并把它们标记为只读**，第一次写才复制。批次 7 的那张每页状态表在这里从"两态标志"升级为**引用计数** —— 正是它当初被留下的理由。
+
+The old `uvmcopy()` allocated and copied every page the parent had. Batch 8 makes fork share the parent's physical pages and mark them read-only, copying only on the first store. Batch 7's per-page table becomes a reference count here, which is exactly what it was left in place for.
+
+**引用计数 / The reference count**（`kernel/kalloc.c`）
+
+| 值 / Value | 含义 / Meaning |
+| --- | --- |
+| `0` | 在空闲链表上 / on `kmem.freelist` |
+| `1` | 已交出，独占 / handed out to one owner |
+| `n > 1` | 被 n 个页表映射 / mapped by n page tables |
+
+- `kalloc()` 要求取出的页计数为 `0` 并置为 `1`；`kfree()` 要求计数非 `0`，减一后**只有归零才真正回链表**。同一页被释放两次因此仍是即时 `panic` —— 批次 7 的检测原封不动。
+- `kref()` 只在 `uvmcopy()` 里被调用：把引用计数加一。它 `panic` 而不让 `uchar` 回绕；`NPROC = 64` 保证一页最多被 64 个进程共享，所以 1 字节够用，不必用 `int` 让每页多占 3 字节。
+- 计数器语义随之修正：`pages_live` 现在是 `kalloc_calls − pages_released`，**不是** `− kfree_calls`。共享页的 `kfree()` 只减引用、不回链表；若仍按 `kfree_calls` 计，`live` 会一路向下漂移，`mem_free + live` 这条守恒律就不再成立（`kmemtest` 正盯着它）。
+
+**写时复制 / The copy**（`kernel/vm.c`、`kernel/trap.c`）
+
+- `uvmcopy()` 对**可写**页：先 `kref()`，再在子进程页表里以 `PTE_COW` 且清 `PTE_W` 映射，最后清掉父进程页表里的 `PTE_W`。对**只读**页（exec 载入的正文段）：只 `kref()`，不标 `PTE_COW` —— 写它仍然是错误，不会悄悄换来一份可写副本。
+- 两侧都清掉 `PTE_W` 是这套方案的核心不变式：**只要引用计数 ≥ 2，就没有任何人能就地写这一页**。写触发 `scause = 15`，`cowfault()` 分配一份私有副本、改写 PTE，再 `kfree()` 掉本进程持有的那个引用。
+- **内核也是写者**：`copyout()` 写入用户内存，因此必须走同一条路。若只处理用户态缺页，`read()`、`sysinfo()` 这类系统调用会把字节直接写进父进程的页里，fork 承诺的隔离就白给了 —— 这是最容易被漏掉的一处。
+- `PTE_COW` 取 `1L << 8`：Sv39 把 PTE 的第 8、9 位留给软件。它在 `PTE_FLAGS`（`0x3FF`）之内，因此 `uvmcopy()` 复制 flags 时会顺带把它带过去 —— 这正是"一个已被共享的页再被 fork 时仍能继续 COW"的原因。
+
+**独占页不拷贝 / A page with one reference needs no copy**
+
+`cowfault()` 里有一条快捷路径：若引用计数已是 `1`，说明共享它的那个进程已经退出、这一页只属于当前进程，那就把 `PTE_W` 加回去，一个字节也不必拷。少了它，shell 每跑完一条命令后第一次写自己的每个页都会白拷一次，恰恰是 COW 想省掉的开销。读取计数与改写 PTE 不是原子的，**也不需要是**：一个页只可能在**本进程被 fork** 时增加引用，而 xv6 的进程是单线程的，此刻不可能发生；并发的退出只能让计数下降，而要释放一页必须经过 0，我们还持有映射，它到不了 0。
+
+**可观测性 / What it looks like from user space**
+
+`struct sysinfo` 追加 5 个字段（它没有页大小约束，加字段是安全的；批次 5 的那张字段表只覆盖当时交付的 9 个）：
+
+| 字段 / Field | 来源 / Source |
+| --- | --- |
+| `pages_shared` | O(1) 计数器：引用计数 ≥ 2 的页数 |
+| `pages_shared_ref` | **同一个量的 O(N) 参考实现**，在**同一个** `sysinfo()` 调用里扫一遍状态表 |
+| `kref_calls` | `kref()` 累计调用次数（fork 带来的引用总数）|
+| `cow_faults` | 被 `cowfault()` 解决的写缺页数 |
+| `cow_copies` | 其中真正拷了一页的次数 |
+
+`pages_shared` 与 `pages_shared_ref` 是本项目第三组"O(1) 计数器 vs O(N) 参考实现"（前两组是 `freemem`/`freemem_walk`、`fsinfo`/`fscount_walk`），区别在于这两个数由**同一次系统调用**返回，因而可以互相比较 —— 分成两次调用会引入时间窗。代价是每次 `sysinfo()` 都要在持 `kmem.lock` 时扫 32 KiB 状态表，只有 `neofetch`、`kmemtest`、`cowtest` 三个程序付这个代价。`cow_faults` 与 `cow_copies` 的差值本身即观测量：它统计"因对方已退出而省掉的拷贝次数"。
+
+**自检 / Self-check**
+
+`cowtest` 用已有的观测设施验证四条断言，而不是靠肉眼：
+
+1. **fork 的代价**：先把 32 页读起来，再 fork 一个子进程；子进程报告自己已就绪后**阻塞**在管道上，父进程在"子进程确实活着"的时刻测 `mem_free`。复制式的 fork 会掉 32 页以上，实测应在 16 页以内（页表 + 内核栈 + trapframe）。
+2. **写隔离**：子进程写满 32 页后，父进程必须仍读到自己的字节；子进程侧 `cow_copies` 至少增加 32。
+3. **copyout 也走 COW**：子进程用 `read()` 把 4 KiB 读进一个与父进程**共享**的页 —— 若 `copyout()` 漏了这条路径，父进程的页会被写脏。
+4. **三代共享**：孙进程写满全部页，父与子都必须看到自己的字节。
+
+每一步都断言 `pages_shared == pages_shared_ref`，并在子进程退出后断言共享页数回到基线 —— 引用计数漏减会比内存泄漏更隐蔽。
+
+三个值得写下来的工程决定 / Three engineering points:
+
+1. **失败路径比成功路径难写**：`uvmcopy()` 中途失败时不能简单回滚。已经 `kref()` 过的页要 `kfree()` 回去，而父进程的 `PTE_W` 只有在该页计数确实回到 `1` 时才能恢复 —— 若它正被更早的一次 fork 共享着，恢复成可写就等于把那个孩子的页也交了出去。
+2. **`PTE_COW` 留在单引用的页上是合法状态**：子进程退出后父进程的页仍是"只读 + COW"标记，直到下一次写被 `cowfault()` 的快捷路径修好。这个状态不产生任何拷贝，所以不是代价，但读 PTE 的代码不该假设"只读页一定没有 `PTE_COW`"。
+3. **守恒律需要重新对齐口径**：把 `pages_live` 从"`kfree()` 调用次数"改成"真正回链表的次数"不是美化，而是让第二章那套校验继续成立的必要条件；计数器的定义跟着语义走。
+
+---
 ## 已知限制 / Known limitations
 
-- **`neofetch` 报告的 CPU 数是编译期上限 `NCPU`（8），不是当前在线的 hart 数**（默认启动 `-smp 3`）。xv6 未导出运行时的 hart 数量。
-  `neofetch` prints the compile-time `NCPU` (8), not the number of online harts (`-smp 3` by default); xv6 does not export the runtime hart count.
+- **`PTE_COW` 可以在引用计数为 1 时仍然挂着**：子进程退出后父进程的页保持"只读 + COW"标记，下一次写由 `cowfault()` 的快捷路径就地修好、不产生拷贝。因此任何查看 PTE 的代码都不该假设"只读页一定没有 `PTE_COW`"，而 `psinfo()`/`vm_rss()` 这类只读遍历不受影响。
+  A page can keep `PTE_COW` after its reference count falls back to one: the next store heals it in place without copying. Code that inspects PTEs must therefore not assume that a read-only page has no `PTE_COW`; read-only walks such as `vm_rss()` are unaffected.
+- **`sysinfo()` 多了一次 O(NPAGE) 的扫描**：`pages_shared_ref` 为了与 O(1) 计数器可比，必须在同一次调用里扫完 32 KiB 状态表，且全程持 `kmem.lock`。这是跨校验的代价，只有 `neofetch` / `kmemtest` / `cowtest` 三个调用者承担。
+  `sysinfo()` now scans the 32 KiB table under `kmem.lock` so that `pages_shared_ref` can be compared with the O(1) counter. Only the three callers of `sysinfo()` pay for it.
+- **`neofetch` 的 `sharing` 行在常规 shell 下通常读数为 0**：xv6 的 shell 走 fork + exec，子进程一 exec 就放弃了共享页。它非零的时候意味着**此刻有子进程正共享着父进程的页**；想看它动起来，请跑 `cowtest`。相比之下 `refs` 是累计值，会随每次 fork 单调增长。
+  The `sharing` line reads 0 under the usual fork+exec shell: the child gives up the shared pages the moment it execs. A non-zero value means a forked child is sharing its parent's pages right now; run `cowtest` to watch it move. `refs` is cumulative and grows with every fork.
+- **页引用计数只有 1 字节**：上限 255，`kref()` 里用一次 `panic` 守住回绕。`NPROC = 64` 意味着上限远够用，但这是一个被写死的耦合 —— 若把 `NPROC` 提到 255 以上就必须换宽度。
+  The reference count is one byte wide, capped at 255 and guarded by a `panic`; `NPROC = 64` keeps that far out of reach, but widening `NPROC` past 255 would need a wider count.- **页状态表占用 32 KiB 静态内存**，且只在 `kalloc`/`kfree` 的热路径上增加两次数组访问。它是调试设施：若需要，可改成每页 2 位的位图（省一半）或用编译开关关掉。
+  The state table costs 32 KiB of static memory plus two array touches per allocator call. It is a debug facility; a 2-bit-per-page bitmap would halve it, and a build flag could disable it.
+- **`pages_total` 不等于 `kalloc` 管理的页数**：它含从不进入空闲链表的内核映像页，而内核映像占多少页并未导出。任何一致性检查都必须用增量。
+- **双重释放检测只能靠审查验证**：从用户态触发它会 `panic` 并停机，无法写进自检程序。
+- **调度器每 tick 做一次 O(NPROC) 全表扫描**：择优与老化合并后仍是一次完整遍历。`NPROC = 64` 下成本可忽略，但它确实比原先"遇到第一个 `RUNNABLE` 就走"更贵。
+  The scheduler walks the whole table every tick. At `NPROC = 64` the cost is negligible, but it is strictly more work than the old "run the first RUNNABLE slot found".
+- **优先级不继承**：`kfork()` 逐字段复制，子进程从 `PRIO_DEFAULT` 开始。若希望子进程继承父进程的优先级，需要显式调用 `setprio`。
+- **老化速率由优先级范围宽度决定**：低优先级进程每 `PRIO_LOWEST - PRIO_HIGHEST + 1` 轮被选中一次。这个比例不是独立参数 —— 改范围就等于改比例。
+- **`setprio` 无权限检查**：任何进程可以改任何进程的优先级（xv6 没有 uid/gid）。
+- **优先级范围刻意压窄（0..9）**：不同于 nice(1) 的 -20..19，窄范围让老化在可观测的时间内生效；代价是"优先级"只能表达一档粗略的差别。
 - **`psinfo()` 的成本随进程规模增长**：快照期间会对每个进程持 `p->lock` 遍历页表树，因此映射页很多的进程会让 `psinfo()` 变慢，而 `top` 每轮都要做一次。这里不能改成「先释放锁再遍历」——那样页表可能被并发释放；这是必要权衡，不是疏漏。
   `psinfo()` walks each process's page table while holding `p->lock`, so its cost grows with what is mapped and `top` pays it every refresh. It cannot drop the lock first, since the table could be torn down underneath it.
 
-- **RSS 是即时快照，且不区分共享页**：`rss` 统计的是快照瞬间低于 `sz` 的已映射页。若将来引入共享映射（如 COW fork 的共享父页），同一页会被计入每个进程的 RSS，与传统 `top` 的行为一致。
+- **RSS 是即时快照，且不区分共享页**：`rss` 统计的是快照瞬间低于 `sz` 的已映射页，批次 8 的共享页会被计入**每个**映射它的进程 —— 与传统 `top` 一致，但意味着 `ps` 里两个进程的 `rss` 相加并不等于它们实际占用的物理内存。要看真实占用，请用 `sysinfo` 的 `pages_shared`。
   RSS is an instantaneous snapshot and does not deduplicate shared pages: if shared mappings are ever added (COW parent pages, say), a shared page counts in every process's RSS, same as traditional `top`.
 - **`struct psinfo` 已无剩余空间**：加入 `rss` 后 sizeof 恰好 64，`64 × NPROC = PGSIZE`。再增字段会直接编译失败，届时快照须跨两页。
   There is no room left in `struct psinfo`: with `rss` its size is exactly 64 and `64 * NPROC == PGSIZE`. Adding a field fails to compile by design.
 - **`waitx` 的账目可能少一格 tick**：冻结发生在退出路径末尾，此后到 `sched()` 之间若有定时器中断，那一格不会被任何人记录。这是 tick 级采样精度的固有边界。
   `waitx` accounting can be one tick short: the freeze happens at the end of the exit path, and a timer interrupt after it is charged to nobody. This is inherent to tick-granularity sampling.
-- **`df` 的 `total` 是整盘块数而非"可放数据的块数"**：mkfs 把元数据块也在同一张位图里标记为已用，因此它们计入 used。这与 Linux `df` 的语义略窄 —— 想看数据块余量，应从 total 中扣掉 `nmeta`。
-  `df`'s `total` counts the whole image, not only data blocks: mkfs marks metadata blocks used in the same bitmap. The narrower "data blocks remaining" figure would subtract `nmeta`.
 - CPU 时间是**采样**得到：内核把 tick 记给被中断的那个进程，因此单次连续占用不足 1 tick（100 ms）的进程可能显示为 0。
   CPU time is **sampled**: a process that burns less than one tick (100 ms) at a stretch may show up as 0.
 - `uptime()`（全局 `ticks`）只在 hart 0 上递增，而被统计的进程可能运行在任意 hart 上，因此两者之间存在少量偏斜；`cputest` 的容差 `TOLERANCE = 4` 即为此设置。
@@ -463,13 +738,11 @@ waitxtest: OK
 
 ## 路线图 / Roadmap
 
-已完成批次 1–4。后续候选方向（尚未排期）：
+已完成批次 1–8。批次 6 的调度器优先级与批次 8 的写时复制 fork 见其各自的小节；批次 5 的选型讨论保留在 `docs/batch5-plan.md` 第 7 章。
 
-Batches 1-4 are complete. Candidate directions not yet scheduled:
+Batches 1-8 are complete; see the batch 6 and batch 8 sections above.
 
-- `kalloc` 调试设施（双重释放 / 泄漏检测）、运行时在线 hart 数 —— 批次 5
-- 磁盘 I/O 计数（`bio.c` 累计读写块数）—— 批次 5
-- 其他子系统（调度器优先级、信号、COW fork）—— 批次 6+，工作量显著更大
+- 批次 9+：信号投递（唯一能解锁"可被中断的用户程序"的机制）、`/proc` 伪文件系统，以及把页引用计数换成 `int` 之类的可选清理
 
 ---
 

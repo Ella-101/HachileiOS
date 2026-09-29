@@ -2,6 +2,7 @@
 
 #include "kernel/psinfo.h"
 #include "kernel/fsstat.h"
+#include "kernel/sysinfo.h"
 
 struct stat;
 
@@ -33,6 +34,8 @@ uint64 freemem(void);
 int klog(char *buf, int max, uint64 *seq, uint64 *lost);
 int waitx(int *status, uint64 *utime, uint64 *ktime);
 int fsinfo(struct fsstat *st);
+int sysinfo(struct sysinfo *info);
+int setprio(int pid, int prio);
 
 // ulib.c
 int stat(const char *, struct stat *);

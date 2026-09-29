@@ -9,6 +9,29 @@
 
 struct cpu cpus[NCPU];
 
+// Harts that have reached scheduler().  Each hart increments this once, so
+// there is a single writer per hart and the value only ever moves forward.
+// A relaxed atomic is enough: this is a statistic, not a synchronisation
+// device -- contrast the release/acquire pair used for `started` in main.c,
+// which really does order memory between harts.
+static uint64 ncpu_online_cnt;
+
+void
+cpu_online_inc(void)
+{
+  __atomic_fetch_add(&ncpu_online_cnt, 1, __ATOMIC_RELAXED);
+}
+
+// Read by sysinfo().  This counts harts that have entered the scheduler, not
+// the number QEMU was configured with (-smp): a hart still initialising is
+// not counted yet.  Reporting what is really online is more useful than
+// echoing a compile-time constant.
+uint64
+ncpu_online(void)
+{
+  return __atomic_load_n(&ncpu_online_cnt, __ATOMIC_RELAXED);
+}
+
 // psinfo() fills a single kalloc page with one entry per process slot.
 // This fails to compile (negative array size) if that stops being true.
 typedef char
@@ -108,6 +131,14 @@ allocpid()
   return pid;
 }
 
+// Aging floor for cur_prio.  A waiting process gains one notch of urgency
+// on every scheduling pass and is put back at its static priority once it
+// is chosen, so a PRIO_LOWEST process is picked at least once every
+// (PRIO_LOWEST - PRIO_HIGHEST + 1) passes.  The floor stops the counter
+// from drifting towards INT_MIN over a long run; it sits below every real
+// priority, so it never hides an actual difference.
+#define PRIO_AGING_FLOOR (-(PRIO_LOWEST + 1))
+
 // Look in the process table for an UNUSED proc.
 // If found, initialize state required to run in the kernel,
 // and return with p->lock held.
@@ -148,6 +179,11 @@ found:
   // ps looks fine, but psinfo() copies all 16 bytes to user space
   // and would hand those stale kernel bytes to the caller.
   memset(p->name, 0, sizeof(p->name));
+
+  // Same reasoning as the counters above: a recycled slot must not inherit
+  // the previous process priority.
+  p->prio = PRIO_DEFAULT;
+  p->cur_prio = PRIO_DEFAULT;
 
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
@@ -490,16 +526,35 @@ scheduler(void)
     intr_on();
     intr_off();
 
-    int found = 0;
+    // One pass both chooses and ages.  `best` is the runnable process
+    // with the smallest dynamic priority; ties go to the earlier slot, and
+    // because every loser gains a notch the tie cannot persist.  The
+    // pointer stays valid whatever happens next -- the proc array is
+    // static -- but the state must be re-checked under the lock below:
+    // the winner may have slept, exited, or had its slot recycled during
+    // the pass.
+    struct proc *best = 0;
     for (p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if (p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
+        if (best == 0 || p->cur_prio < best->cur_prio)
+          best = p;
+        // Aging: a process that keeps losing becomes more urgent.
+        if (p->cur_prio > PRIO_AGING_FLOOR)
+          p->cur_prio--;
+      }
+      release(&p->lock);
+    }
+
+    int found = 0;
+    if (best) {
+      acquire(&best->lock);
+      if (best->state == RUNNABLE) {
+        // It has had its turn, so back to its static priority.
+        best->cur_prio = best->prio;
+        best->state = RUNNING;
+        c->proc = best;
+        swtch(&c->context, &best->context);
 
         // Don't re-enable interrupts on release.
         mycpu()->intena = 0;
@@ -509,8 +564,9 @@ scheduler(void)
         c->proc = 0;
         found = 1;
       }
-      release(&p->lock);
+      release(&best->lock);
     }
+
     if (found == 0) {
       // nothing to run; stop running on this core until an interrupt.
       asm volatile("wfi");
@@ -668,6 +724,32 @@ kkill(int pid)
   return -1;
 }
 
+// Set the scheduling priority of process pid.  The caller has already
+// clamped prio to PRIO_HIGHEST..PRIO_LOWEST; see sys_setprio().
+//
+// xv6 has no uid/gid, so there is no permission check: any process may
+// change any other process priority.  That is a teaching
+// simplification, stated here on purpose rather than left implicit.
+int
+ksetprio(int pid, int prio)
+{
+  struct proc *p;
+
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->pid == pid && p->state != UNUSED) {
+      p->prio = prio;
+      // Take effect at the next scheduling decision rather than waiting
+      // for the aging pass to walk the number down.
+      p->cur_prio = prio;
+      release(&p->lock);
+      return 0;
+    }
+    release(&p->lock);
+  }
+  return -1;
+}
+
 void
 setkilled(struct proc *p)
 {
@@ -754,7 +836,7 @@ psinfo(uint64 uaddr, int max)
         e->pid = p->pid;
         e->ppid = p->parent ? p->parent->pid : 0;
         e->state = p->state;
-        e->_pad = 0;
+        e->prio = p->prio;
         e->sz = p->sz;
         // Walk the page table while still holding p->lock, so the table
         // cannot be torn down underneath us.  This is a tree walk, not

@@ -135,6 +135,12 @@ fsinfo(struct fsstat *st)
   // sb.size, not sb.nblocks.  Using nblocks here would double-count the
   // metadata and under-report free space.
   st->blocks = sb.size;
+  // Metadata blocks.  mkfs computes nblocks = size - nmeta, so the
+  // difference is exactly the number of blocks that hold no file data
+  // (boot, superblock, log, inodes, bitmap).  Reusing the arithmetic
+  // mkfs already did is safer than re-deriving the inode and bitmap
+  // block counts here, which would drift if either constant changed.
+  st->nmeta = sb.size - sb.nblocks;
   st->inodes = sb.ninodes;
   st->blocksfree = (sb.size > ub) ? sb.size - ub : 0;
   st->inodesfree = (sb.ninodes > ui) ? sb.ninodes - ui : 0;

@@ -3,7 +3,7 @@
 #include "kernel/types.h"
 #include "kernel/param.h"
 #include "kernel/psinfo.h"
-#include "kernel/minios.h"
+#include "kernel/sysinfo.h"
 #include "user/user.h"
 
 static struct psinfo procs[NPROC];
@@ -12,7 +12,7 @@ int
 main(int argc, char *argv[])
 {
   int n, i, nproc = 0;
-  uint64 free_mem;
+  struct sysinfo si;
 
   n = psinfo(procs, NPROC);
   if (n < 0) {
@@ -23,7 +23,10 @@ main(int argc, char *argv[])
     if (procs[i].state != PSTATE_UNUSED)
       nproc++;
 
-  free_mem = freemem();
+  if (sysinfo(&si) < 0) {
+    fprintf(2, "neofetch: sysinfo failed\n");
+    exit(1);
+  }
 
   printf("     +------------------------------+\n");
   printf("     |    m i n i O S   x v 6       |\n");
@@ -33,10 +36,21 @@ main(int argc, char *argv[])
   printf("   user      : user\n");
   printf("   os        : miniOS on xv6-riscv\n");
   printf("   arch      : riscv64 (rv64gc)\n");
-  printf("   cpus      : %d (NCPU maximum)\n", NCPU);
+  printf("   cpus      : %ld online of %ld max\n", si.ncpu_online, si.ncpu_max);
   printf("   memory    : %ld MB total, %ld KB free\n",
-         MINIOS_MEM_TOTAL / (1024 * 1024), free_mem / 1024);
+         si.mem_total / (1024 * 1024), si.mem_free / 1024);
+  printf("   pages     : %ld live of %ld (%ld kalloc calls)\n", si.pages_live,
+         si.pages_total, si.alloc_calls);
+  printf("   sharing   : %ld of %ld live pages shared, %ld refs\n",
+         si.pages_shared, si.pages_live, si.kref_calls);
+  printf("   cow       : %ld store faults, %ld of them needed a copy\n",
+         si.cow_faults, si.cow_copies);
   printf("   processes : %d\n", nproc);
+  printf("   disk      : %ld block reads, %ld writes\n", si.disk_reads,
+         si.disk_writes);
+  printf("   bcache    : %ld hits, %ld misses\n", si.bcache_hits,
+         si.bcache_misses);
+  printf("   vmfaults  : %ld\n", si.vmfaults);
   printf("   uptime    : %d ticks\n", uptime());
   printf("\n");
 

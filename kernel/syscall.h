@@ -26,3 +26,5 @@
 #define SYS_klog    25
 #define SYS_waitx   26
 #define SYS_fsinfo  27
+#define SYS_sysinfo 28
+#define SYS_setprio 29

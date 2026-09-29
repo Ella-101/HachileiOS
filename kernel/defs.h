@@ -10,6 +10,7 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
+struct sysinfo;
 
 // bio.c
 void            binit(void);
@@ -18,6 +19,7 @@ void            brelse(struct buf*);
 void            bwrite(struct buf*);
 void            bpin(struct buf*);
 void            bunpin(struct buf*);
+void            bio_stats(uint64*, uint64*);
 
 // console.c
 void            consoleinit(void);
@@ -63,8 +65,14 @@ void            fsinfo(struct fsstat*);
 // kalloc.c
 void*           kalloc(void);
 void            kfree(void *);
+void            kref(void *);
+int             krefcnt(void *);
+uint64          kshared(void);
+uint64          kshared_walk(void);
+uint64          krefs(void);
 void            kinit(void);
 uint64          freemem_walk(void);
+void            kalloc_stats(uint64*, uint64*, uint64*);
 uint64          freemem(void);
 
 // log.c
@@ -94,6 +102,7 @@ void            proc_mapstacks(pagetable_t);
 pagetable_t     proc_pagetable(struct proc *);
 void            proc_freepagetable(pagetable_t, uint64);
 int             kkill(int);
+int             ksetprio(int, int);
 int             killed(struct proc*);
 void            setkilled(struct proc*);
 struct cpu*     mycpu(void);
@@ -110,6 +119,8 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 int             psinfo(uint64, int);
+uint64          ncpu_online(void);
+void            cpu_online_inc(void);
 void            procdump(void);
 
 // swtch.S
@@ -178,7 +189,11 @@ int             copyin(pagetable_t, uint64, char *, uint64, uint64);
 int             copyinstr(pagetable_t, uint64, char *, uint64, uint64);
 int             ismapped(pagetable_t, uint64);
 uint64          vmfault(pagetable_t, uint64, uint64, int);
+uint64          cowfault(pagetable_t, uint64, uint64);
 uint64          vm_rss(pagetable_t, uint64);
+uint64          vmfaults(void);
+uint64          cowfaults(void);
+uint64          cowcopies(void);
 
 // plic.c
 void            plicinit(void);
@@ -188,6 +203,7 @@ void            plic_complete(int);
 
 // virtio_disk.c
 void            virtio_disk_init(void);
+void            disk_stats(uint64*, uint64*);
 void            virtio_disk_rw(struct buf *, int);
 void            virtio_disk_intr(void);
 
