@@ -34,7 +34,7 @@
 // What a bare fork() may cost: a top-level table, an L0 table, a kernel stack
 // and a trapframe.  Anything near NPAGES would mean the pages were copied.
 #define FORK_MAX_PAGES 16
-#define TOLERANCE 8 // pages; the shell and the console may allocate a little
+#define TOLERANCE      8 // pages; the shell and the console may allocate a little
 
 static struct sysinfo si;
 static char *area;   // NPAGES pages, touched so that they are resident

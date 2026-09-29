@@ -20,8 +20,8 @@
 #include "kernel/sysinfo.h"
 #include "user/user.h"
 
-#define PGSIZE 4096 // not exported to user space; see memlayout.h in the kernel
-#define ROUNDS 3
+#define PGSIZE    4096 // not exported to user space; see memlayout.h in the kernel
+#define ROUNDS    3
 #define CHILDREN  5
 #define MEMPAGES  64
 #define TOLERANCE 4 // pages; other processes allocate a little while we look
