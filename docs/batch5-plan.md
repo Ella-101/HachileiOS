@@ -7,6 +7,8 @@
 > **批次 6（调度器优先级 + `setprio`）已在分支 `batch6-priority-scheduling` 上落地**，设计要点、三个工程取舍与自检方法写在 `README.md` 的批次 6 小节。本文档 §7.1–7.2 的选型分析（为什么选优先级而不是 COW/`/proc`）与关键发现（`_pad` 是免费的 4 字节）已据此实现，保留作为决策记录。
 >
 > **批次 7（`kalloc` 页状态表 / 双重释放检测）已在分支 `batch7-kalloc-debug` 上完成并在 WSL 验证通过**（`kmemtest` 守恒、`neofetch` 页数、`usertests` 全过），要点与取舍见 `README.md` 的批次 7 小节。§7.3 把它排在批次 6 之后、COW 之前，因为它同时是 COW 引用计数的落点。
+
+> **批次 8（写时复制 fork）已在分支 `batch8-cow-fork` 上完成并在 WSL 验证通过**（`cowtest` 四项断言全过、`neofetch` 读数自洽、`usertests` 全过）：批次 7 的每页状态表升级为引用计数，`uvmcopy()` 改为共享父页并标只读，`cowfault()` 处理写缺页（含"独占页免拷贝"快捷路径），`copyout()` 也走 COW（内核同样是写者）。要点、三条工程取舍与 `cowtest` 的四项断言写在 `README.md` 的批次 8 小节；`struct sysinfo` 追加 `pages_shared` / `pages_shared_ref` / `kref_calls` / `cow_faults` / `cow_copies` 五个字段。
 >
 > | 项 | 内容 | 状态 |
 > | --- | --- | --- |

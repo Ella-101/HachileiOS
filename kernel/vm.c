@@ -289,19 +289,31 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
-// Given a parent process's page table, copy
-// its memory into a child's page table.
-// Copies both the page table and the
-// physical memory.
+// Given a parent process's page table, spread its memory into a child's
+// page table by sharing the physical pages instead of duplicating them.
+//
+// A page the parent can write is mapped read-only and marked PTE_COW in
+// both tables, and its reference count is raised; the first store by either
+// process then takes a private copy (see cowfault).  A page the parent
+// cannot write -- the text segment of an exec'd program -- is shared
+// read-only as it stands and deliberately NOT marked PTE_COW, so that a
+// store to it stays the error it always was instead of quietly earning a
+// writable copy.
+//
+// Only the parent's own hart runs here (an xv6 process has a single thread
+// of control), so rewriting the parent's PTEs needs no lock, and the child
+// is not runnable yet so nobody can see its table either.  The other
+// references to a page we share belong to other processes, and dropping a
+// reference can never free a page the table still credits to us.
+//
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
-  uint64 pa, i;
+  uint64 pa, i, j;
   uint flags;
-  char *mem;
 
   for (i = 0; i < sz; i += PGSIZE) {
     if ((pte = walk(old, i, 0)) == 0)
@@ -310,18 +322,45 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       continue; // physical page hasn't been allocated
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if ((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char *)pa, PGSIZE);
-    if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0) {
-      kfree(mem);
+
+    if ((*pte & PTE_W) == 0) {
+      // Read-only: the child can simply share it, and flags already carries the
+      // reason it is read-only.  A text page has neither PTE_W nor PTE_COW, so it
+      // is shared as it stands and a store to it still kills the process.  A page
+      // that an earlier fork made shared is read-only *because* of PTE_COW, and
+      // flags carries that bit through, so a store still takes a copy.  The two
+      // cases differ in why the write bit is clear, not in what a write does.
+      kref((void *)pa);
+      if (mappages(new, i, PGSIZE, pa, flags) != 0) {
+        kfree((void *)pa);
+        goto err;
+      }
+      continue;
+    }
+
+    // Writable: share it, but clear W on both sides so the first store by
+    // either process traps, and record why it trapped.
+    kref((void *)pa);
+    if (mappages(new, i, PGSIZE, pa, (flags & ~PTE_W) | PTE_COW) != 0) {
+      kfree((void *)pa);
       goto err;
     }
+    *pte = PA2PTE(pa) | ((flags & ~PTE_W) | PTE_COW);
   }
   return 0;
 
 err:
+  // Unmapping the child drops the references this fork just added...
   uvmunmap(new, 0, i / PGSIZE, 1);
+  // ...and that is what makes the parent's pages safe to look at again: a
+  // page belongs to the parent alone only once its count is back down to
+  // one, so a page an earlier fork still shares has to stay PTE_COW.
+  for (j = 0; j < i; j += PGSIZE) {
+    pte_t *ppte = walk(old, j, 0);
+    if (ppte != 0 && (*ppte & PTE_COW) != 0 &&
+        krefcnt((void *)PTE2PA(*ppte)) == 1)
+      *ppte = (*ppte & ~PTE_COW) | PTE_W;
+  }
   return -1;
 }
 
@@ -360,9 +399,17 @@ copyout(pagetable_t pagetable, uint64 psz, uint64 dstva, char *src, uint64 len)
     }
 
     pte = walk(pagetable, va0, 0);
-    // forbid copyout over read-only user text pages.
-    if ((*pte & PTE_W) == 0)
-      return -1;
+    if ((*pte & PTE_W) == 0) {
+      // A page shared by a copy-on-write fork is read-only on purpose.  The
+      // kernel is as much a writer as the user is, so it has to take the
+      // private copy too: writing straight through would put the bytes into
+      // the other process's page as well and undo the isolation the fork
+      // promised.
+      if ((*pte & PTE_COW) == 0)
+        return -1; // read-only user text, exactly as before
+      if ((pa0 = cowfault(pagetable, psz, va0)) == 0)
+        return -1;
+    }
 
     n = PGSIZE - (dstva - va0);
     if (n > len)
@@ -489,6 +536,83 @@ vmfault(pagetable_t pagetable, uint64 psz, uint64 va, int read)
     return 0;
   }
   __atomic_fetch_add(&vmfault_cnt, 1, __ATOMIC_RELAXED);
+  return mem;
+}
+
+// Store faults that cowfault() resolved, for sysinfo().  Relaxed atomics, for
+// the same reason as vmfault_cnt: several harts fault at once and the values
+// are only read for reporting.
+static uint64 cow_fault_cnt;
+static uint64 cow_copy_cnt; // the subset of those that had to copy a page
+
+uint64
+cowfaults(void)
+{
+  return __atomic_load_n(&cow_fault_cnt, __ATOMIC_RELAXED);
+}
+
+uint64
+cowcopies(void)
+{
+  return __atomic_load_n(&cow_copy_cnt, __ATOMIC_RELAXED);
+}
+
+// Handle a store fault on a page that a copy-on-write fork shared: give the
+// faulting process a private copy and return its physical address.  Returns
+// 0 if va is not a copy-on-write page -- the fault is then the bad access it
+// always was and the caller kills the process -- or if memory ran out.
+//
+// Only stores reach here.  PTE_R stays set on a shared page, so reads do not
+// fault, and a store to a page that was never writable carries no PTE_COW
+// and is rejected.
+uint64
+cowfault(pagetable_t pagetable, uint64 psz, uint64 va)
+{
+  pte_t *pte;
+  uint64 pa, mem;
+  uint flags;
+
+  if (va >= psz)
+    return 0;
+  va = PGROUNDDOWN(va);
+
+  pte = walk(pagetable, va, 0);
+  if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_COW) == 0)
+    return 0;
+
+  pa = PTE2PA(*pte);
+  flags = PTE_FLAGS(*pte);
+
+  if (krefcnt((void *)pa) == 1) {
+    // Nobody else maps this page any more: the process that shared it with
+    // us has exited.  There is nothing worth copying, so a store is simply
+    // a store again -- and copying here would be waste of the kind the shell
+    // would pay on the first write to every one of its pages after every
+    // command it runs.  Reading the count and then rewriting the PTE is not
+    // atomic and does not need to be: a page can only gain a reference when
+    // this very process is forked, which cannot happen while we are here,
+    // because an xv6 process has a single thread of control.  A concurrent
+    // exit can only lower the count, and it has to pass through zero for the
+    // page to be freed, which it cannot while we still hold this mapping.
+    *pte = PA2PTE(pa) | ((flags & ~PTE_COW) | PTE_W);
+    __atomic_fetch_add(&cow_fault_cnt, 1, __ATOMIC_RELAXED);
+    return pa;
+  }
+
+  if ((mem = (uint64)kalloc()) == 0)
+    return 0;
+  memmove((char *)mem, (char *)pa, PGSIZE);
+
+  // The copy has to be in place before the old reference is dropped: the page
+  // must not go back to the free list while we are still reading it.  Only
+  // this hart writes this PTE, so no other hart can observe a half-updated
+  // mapping.  kfree() then gives up the reference this process held, which is
+  // what makes the private copy genuinely private.
+  *pte = PA2PTE(mem) | ((flags & ~PTE_COW) | PTE_W);
+  kfree((void *)pa);
+
+  __atomic_fetch_add(&cow_fault_cnt, 1, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&cow_copy_cnt, 1, __ATOMIC_RELAXED);
   return mem;
 }
 

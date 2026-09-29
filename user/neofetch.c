@@ -41,6 +41,10 @@ main(int argc, char *argv[])
          si.mem_total / (1024 * 1024), si.mem_free / 1024);
   printf("   pages     : %ld live of %ld (%ld kalloc calls)\n", si.pages_live,
          si.pages_total, si.alloc_calls);
+  printf("   sharing   : %ld of %ld live pages shared, %ld refs\n",
+         si.pages_shared, si.pages_live, si.kref_calls);
+  printf("   cow       : %ld store faults, %ld of them needed a copy\n",
+         si.cow_faults, si.cow_copies);
   printf("   processes : %d\n", nproc);
   printf("   disk      : %ld block reads, %ld writes\n", si.disk_reads,
          si.disk_writes);

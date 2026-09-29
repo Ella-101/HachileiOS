@@ -205,6 +205,20 @@ sys_sysinfo(void)
   bio_stats(&info.bcache_hits, &info.bcache_misses);
   disk_stats(&info.disk_reads, &info.disk_writes);
   info.vmfaults = vmfaults();
+  info.pages_shared = kshared();
+  // The O(1) counter and its O(N) reference are returned from the one call,
+  // read back to back, so that comparing them is meaningful: a second
+  // syscall would put more time between the two readings.  They are still
+  // two reads rather than one atomic snapshot, so a fork on another hart in
+  // between them can make the two differ by a page; the comparison is exact
+  // when the caller is the only process running, which is what cowtest sets
+  // up.  The walk costs O(NPAGE) while holding kmem.lock -- 32 KiB of table
+  // to scan -- which is the price of having the cross-check at all; only
+  // the three programs that call sysinfo() pay it.
+  info.pages_shared_ref = kshared_walk();
+  info.kref_calls = krefs();
+  info.cow_faults = cowfaults();
+  info.cow_copies = cowcopies();
 
   if (copyout(p->pagetable, p->sz, addr, (char *)&info, sizeof(info)) < 0)
     return -1;

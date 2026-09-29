@@ -65,6 +65,11 @@ void            fsinfo(struct fsstat*);
 // kalloc.c
 void*           kalloc(void);
 void            kfree(void *);
+void            kref(void *);
+int             krefcnt(void *);
+uint64          kshared(void);
+uint64          kshared_walk(void);
+uint64          krefs(void);
 void            kinit(void);
 uint64          freemem_walk(void);
 void            kalloc_stats(uint64*, uint64*, uint64*);
@@ -184,8 +189,11 @@ int             copyin(pagetable_t, uint64, char *, uint64, uint64);
 int             copyinstr(pagetable_t, uint64, char *, uint64, uint64);
 int             ismapped(pagetable_t, uint64);
 uint64          vmfault(pagetable_t, uint64, uint64, int);
+uint64          cowfault(pagetable_t, uint64, uint64);
 uint64          vm_rss(pagetable_t, uint64);
 uint64          vmfaults(void);
+uint64          cowfaults(void);
+uint64          cowcopies(void);
 
 // plic.c
 void            plicinit(void);

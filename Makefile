@@ -161,6 +161,7 @@ UPROGS=\
 	$U/_help\
 	$U/_priotest\
 	$U/_kmemtest\
+	$U/_cowtest\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
