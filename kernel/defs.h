@@ -67,6 +67,7 @@ void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
 uint64          freemem_walk(void);
+void            kalloc_stats(uint64*, uint64*, uint64*);
 uint64          freemem(void);
 
 // log.c

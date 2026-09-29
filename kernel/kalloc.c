@@ -14,6 +14,28 @@ void freerange(void *pa_start, void *pa_end);
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
+// One byte of state per physical page, indexed by (pa - KERNBASE)/PGSIZE.
+// 128 MiB of RAM is 32768 pages, so the table costs 32 KiB -- about 0.025% of
+// the memory it describes -- in exchange for turning a silent free-list
+// corruption into an immediate panic: without it, freeing the same page twice
+// splices it into the list twice, and the second kalloc() of that page hands
+// the same memory to two different callers.
+//
+// The table is touched only while kmem.lock is held (kalloc, kfree), so it
+// needs no atomics of its own.
+#define PAGE_FREE  0 // sits on kmem.freelist
+#define PAGE_ALLOC 1 // handed out by kalloc() and not returned yet
+
+#define NPAGE ((PHYSTOP - KERNBASE) / PGSIZE)
+
+static uchar page_state[NPAGE];
+
+static int
+page_index(void *pa)
+{
+  return (int)(((uint64)pa - KERNBASE) / PGSIZE);
+}
+
 struct run {
   struct run *next;
 };
@@ -22,6 +44,13 @@ struct {
   struct spinlock lock;
   struct run *freelist;
   uint64 nfree; // number of pages currently on the free list
+
+  // Cumulative since boot; kalloc_calls - kfree_calls is the number of
+  // pages currently handed out.  kinit() zeroes both after the kernel's own
+  // initial freerange(), so the difference means "since boot" instead of
+  // counting the pages the kernel starts life with.
+  uint64 kalloc_calls;
+  uint64 kfree_calls;
 } kmem;
 
 void
@@ -29,7 +58,18 @@ kinit()
 {
   initlock(&kmem.lock, "kmem");
   kmem.nfree = 0;
+
+  // Every page starts out owned by the kernel: kinit()'s own freerange() is
+  // the one legitimate case of freeing a page that was never allocated, and
+  // starting from ALLOC makes it the single sanctioned ALLOC->FREE transition
+  // rather than a special case inside kfree().
+  memset(page_state, PAGE_ALLOC, sizeof(page_state));
+
   freerange(end, (void *)PHYSTOP);
+
+  // Those pages were not "allocations", so start the counters from zero.
+  kmem.kalloc_calls = 0;
+  kmem.kfree_calls = 0;
 }
 
 void
@@ -49,16 +89,24 @@ void
 kfree(void *pa)
 {
   struct run *r;
+  int i;
 
   if (((uint64)pa % PGSIZE) != 0 || (char *)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
-  // Fill with junk to catch dangling refs.
+  // Fill with junk to catch dangling refs.  Copying happens before the page
+  // becomes visible on the free list, so no other hart can pick it up
+  // half-initialised.
   memset(pa, 1, PGSIZE);
 
   r = (struct run *)pa;
+  i = page_index(pa);
 
   acquire(&kmem.lock);
+  if (page_state[i] != PAGE_ALLOC)
+    panic("kfree: page was not allocated (double free?)");
+  page_state[i] = PAGE_FREE;
+  kmem.kfree_calls++;
   r->next = kmem.freelist;
   kmem.freelist = r;
   kmem.nfree++;
@@ -72,12 +120,21 @@ void *
 kalloc(void)
 {
   struct run *r;
+  int i;
 
   acquire(&kmem.lock);
   r = kmem.freelist;
   if (r) {
+    i = page_index(r);
+    // The mirror of the check in kfree(): a page on the free list must be
+    // marked free.  If it is not, either the list or the table is wrong, and
+    // both are worth stopping for.
+    if (page_state[i] != PAGE_FREE)
+      panic("kalloc: page on the free list is not marked free");
+    page_state[i] = PAGE_ALLOC;
     kmem.freelist = r->next;
     kmem.nfree--;
+    kmem.kalloc_calls++;
   }
   release(&kmem.lock);
 
@@ -117,4 +174,17 @@ freemem(void)
   release(&kmem.lock);
 
   return n * PGSIZE;
+}
+
+// Report the allocator accounting to sysinfo().  All three values are O(1);
+// the O(N) walk in freemem_walk() stays the reference implementation that the
+// free-page count can be checked against.
+void
+kalloc_stats(uint64 *total, uint64 *live, uint64 *calls)
+{
+  acquire(&kmem.lock);
+  *total = NPAGE;
+  *live = kmem.kalloc_calls - kmem.kfree_calls;
+  *calls = kmem.kalloc_calls;
+  release(&kmem.lock);
 }

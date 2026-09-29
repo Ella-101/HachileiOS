@@ -85,6 +85,10 @@ static struct entry cmds[] = {
   {"self-checks", "priotest", "[ticks]",
    "check that the scheduler honours priorities",
    "Defaults to 20 ticks.  Also checks that aging prevents starvation.", 1},
+  {"self-checks", "kmemtest", "",
+   "check allocator accounting and look for page leaks",
+   "Cross-checks the free-page and live-page counters; defaults to 3 rounds.",
+   1},
 
   {"tests", "usertests", "[-q|-c|-C|testname]",
    "the full regression suite",

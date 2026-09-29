@@ -57,10 +57,11 @@ The default QEMU invocation (from the `Makefile`) is `-m 128M -smp 3`.
 | `waitxtest [ticks]` | 子进程 CPU 时间回收的自检程序（默认 5 tick） |
 | `help [command]` | 命令索引；列出可用命令并标注是 xv6 原版还是 miniOS 新增 |
 | `priotest [ticks]` | 调度优先级与老化的自检程序（默认各跑 20 tick） |
+| `kmemtest` | 分配器会计与泄漏的自检程序 |
 
-镜像里共有 **30** 个用户程序（即 `UPROGS` 的 30 项）。不带参数运行 `help` 会按类别列出其中 **29 条**——除 `help` 自身以外的全部命令——并把 miniOS 新增的 9 条用 `*` 标出；`help ps` 则只显示该命令的用法与补充细节。`help` 本身是 miniOS 的第 10 个新增程序，没有把自己列进索引（一个刻意的取舍），但它与其他命令一样只是根目录里的普通程序，`ls` 能看到它。xv6 的 shell 没有内建命令，因此命令索引本身也只能是一个普通程序。
+镜像里共有 **31** 个用户程序（即 `UPROGS` 的 31 项）。不带参数运行 `help` 会按类别列出其中 **30 条**——除 `help` 自身以外的全部命令——并把 miniOS 新增的 10 条用 `*` 标出；`help ps` 则只显示该命令的用法与补充细节。`help` 本身是 miniOS 的第 11 个新增程序，没有把自己列进索引（一个刻意的取舍），但它与其他命令一样只是根目录里的普通程序，`ls` 能看到它。xv6 的 shell 没有内建命令，因此命令索引本身也只能是一个普通程序。
 
-The image holds **30** user programs (the 30 `UPROGS` entries). Run with no arguments, `help` lists **29** of them grouped by category — every command except `help` itself — marking the 9 added by this project with `*`; `help ps` shows just that entry. `help` is itself the 10th program this project added; it deliberately does not index itself, but it is otherwise an ordinary program in the root directory, visible to `ls`. xv6's shell has no built-ins, so the index has to be an ordinary program too.
+The image holds **31** user programs (the 31 `UPROGS` entries). Run with no arguments, `help` lists **30** of them grouped by category — every command except `help` itself — marking the 10 added by this project with `*`; `help ps` shows just that entry. `help` is itself the 11th program this project added; it deliberately does not index itself, but it is otherwise an ordinary program in the root directory, visible to `ls`. xv6's shell has no built-ins, so the index has to be an ordinary program too.
 
 ```
 $ ps
@@ -98,6 +99,7 @@ In the default build both `exec()` and the `sbrk()` library call allocate eagerl
 | 5 | 磁盘 I/O 与缓存命中 / Disk I/O & cache hits | `sysinfo()` (28) → `neofetch` | ✅ 已验证 |
 | 5 | 按需分页计数 / Demand paging count | `sysinfo()` (28) → `neofetch` | ✅ 已验证 |
 | 6 | 调度器优先级 / Scheduler priorities | `setprio()` (29) → `ps` / `priotest` | ✅ 已验证 |
+| 7 | 页状态表与分配器自检 / Per-page state table | `kalloc_stats()` → `sysinfo` (28) → `kmemtest` | ✅ 已验证 |
 
 ---
 
@@ -374,6 +376,44 @@ Until batch 6 every syscall this project added was read-only. Batch 6 adds the f
 ---
 
 
+### 批次 7 — 页状态表与分配器自检 / Batch 7 — Per-page state table & allocator self-check
+
+`kalloc()` 原有的防护只看**参数**：指针是否页对齐、是否落在 `[end, PHYSTOP)` 之内。它看不见**所有权**错误 —— 同一页被 `kfree()` 两次时，该页会被同一张空闲链表串两次，之后 `kalloc()` 会把同一块内存交给两个不同的调用者，而现场毫无提示。批次 7 用一张每页 1 字节的状态表，把这种静默损坏变成即时 `panic`。
+
+The existing checks in `kalloc()` only validate the *argument*: page alignment and range. They cannot see an *ownership* error -- freeing the same page twice splices it into the free list twice, so a later `kalloc()` hands the same memory to two different callers, silently.
+
+**状态表 / The state table**（`kernel/kalloc.c`）
+
+- `page_state[NPAGE]`，其中 `NPAGE = (PHYSTOP - KERNBASE) / PGSIZE` = 32768，即 **32 KiB**。
+- 只有两个取值：`PAGE_FREE`（在空闲链表上）与 `PAGE_ALLOC`（已交出、未归还）。
+- 两侧互为镜像：`kfree()` 要求当前是 `PAGE_ALLOC`，`kalloc()` 要求取出的页是 `PAGE_FREE`；任一不符即 `panic`。
+- **成本与取舍**：32 KiB 是被描述内存的 0.025%。这是**调试设施**，生产内核不需要它 —— 保留它是本项目的刻意选择，换取"双重释放导致链表损坏"从静默故障变成立即停机。
+- **不需要原子操作**：`page_state` 只在持有 `kmem.lock` 时被读写（`kalloc()`/`kfree()` 本就在锁内操作链表），因此它不引入新的同步开销。
+- `kinit()` 先把整张表置为 `PAGE_ALLOC` 再调用 `freerange()`：于是"释放一个从未分配过的页"就只剩 `kinit` 自己这一次**合法**的 `ALLOC→FREE` 迁移，不必在 `kfree()` 里开特例。
+
+**计数器与自检 / Counters and self-check**
+
+`kmem` 增加 `kalloc_calls` / `kfree_calls` 两个累计计数，`kinit()` 在 `freerange()` 之后清零，所以差值表示"自启动以来交出的页数"。`kalloc_stats()` 经 `sysinfo()` 导出三个新字段：
+
+| 字段 / Field | 含义 / Meaning |
+| --- | --- |
+| `pages_total` | 全部物理页 = 32768，**含**从不归 `kalloc` 管的内核映像页 |
+| `pages_live` | 已交出未归还的页数 = `kalloc_calls - kfree_calls` |
+| `alloc_calls` | 累计 `kalloc()` 成功次数 |
+
+`kmemtest` 交叉检查**两条互相独立**的会计路径：
+
+1. **守恒律**：`mem_free`（来自 O(1) 的 `nfree` 计数）与 `pages_live`（来自调用计数）之和是一个常量 —— `nfree + live` 恒等于内核映像之后的页数 —— 所以分配前后必须完全不变。
+2. **泄漏检测**：子进程 `sbrk` 64 页后退出，`pages_live` 必须回落到基线（容差 4 页）。
+
+> ⚠️ 守恒律只能用**增量**判断，不能写成 `pages_live == pages_total - pages_free`：`pages_total` 含内核映像页而 `nfree` 不含，两者起点不同。这是本批次最容易写错的一处，`kmemtest.c` 的注释里也写明了。
+> The invariant only holds for *deltas*: `pages_total` includes the kernel image pages while `nfree` does not, so an absolute equality would be wrong.
+
+**无法从用户态测试的部分 / What cannot be tested from user space**：双重释放检测会 `panic`，触发即整机停机，所以它只能靠代码审查与"临时改坏一处再跑"来验证。
+
+---
+
+
 ## 新增系统调用 / New system calls
 
 | 编号 | 名称 | 用户态原型 | 返回 |
@@ -412,12 +452,13 @@ Numbers live in `kernel/syscall.h`, the dispatch table in `kernel/syscall.c`, th
 | `user/waitxtest.c` | 子进程 CPU 时间回收自检 |
 | `user/help.c` | 命令索引，标注每条命令的来源 |
 | `user/priotest.c` | 调度优先级与老化的自检程序 |
+| `user/kmemtest.c` | 分配器会计（守恒律）与泄漏的自检程序 |
 
 ### 修改 / Modified
 
 | 文件 | 改动 |
 | --- | --- |
-| `kernel/kalloc.c` | `kmem.nfree` O(1) 计数器；`freemem()`、`freemem_walk()` |
+| `kernel/kalloc.c` | `kmem.nfree` O(1) 计数器；`freemem()`、`freemem_walk()`；批次 7 的 `page_state[]` 状态表、`kalloc_calls`/`kfree_calls` 计数与 `kalloc_stats()` |
 | `kernel/vm.c` | `vm_rss()` 驻留页统计（递归遍历三级页表）；`vmfaults()` 按需分页计数 |
 | `kernel/fs.c` | O(1) 块/inode 计数器；`fscount_scan()`、`fscount_walk()`、`fsinfo()`（含 `nmeta` 推导） |
 | `kernel/printk.c` | 无锁日志环形缓冲区；`kputc()` tee；`klog_read()` |
@@ -556,6 +597,25 @@ priotest: OK (urgent 18 vs slack 2 ticks)
 
 `prio` 列可直接在 `ps` 里观察：新进程都是 `PRIO_DEFAULT`(5)，`setprio` 之后立即改变。若把 `PRIO_LOWEST` 调到很大的值（例如把范围改成 0..99），可以观察到松弛进程的等待轮数随之线性增长 —— 老化比例由范围宽度决定。
 
+**分配器自检 / Allocator self-check**
+
+```sh
+$ kmemtest
+kmemtest: pages total 32768, live 118, alloc calls 4210
+kmemtest: mem total 131072 KB, free 132763 KB
+kmemtest: conserved quantity is 133152768 bytes (free 32512 pages + live)
+kmemtest: counters agree, 64 pages allocated and returned
+kmemtest: round 1: live 118 -> 118 after 5 children
+kmemtest: round 2: live 119 -> 119 after 5 children
+kmemtest: round 3: live 119 -> 119 after 5 children
+kmemtest: OK (conserved, no leak over 3 rounds)
+```
+
+（示意输出，具体数值随运行状态变化）第 3 行是守恒量：`mem_free + pages_live × 4096`，它来自两条互不相干的会计路径，因此它保持不变才算两条路径一致。
+
+**双重释放检测的手工验证 / Exercising the double-free check**：把 `kfree()` 的调用临时改成对同一页释放两次（例如在 `proc_freepagetable()` 之后再加一次 `kfree`），启动后应立刻看到
+`panic: kfree: page was not allocated (double free?)`。这一步**不能**放进 `kmemtest`，因为它会停机。
+
 **手动检查 / Manual checks**
 
 - `dmesg` 可回放内核启动日志；执行 `echo hello` 后再 `dmesg`，**不会**包含 `hello` —— 证明 tee 边界正确（用户态 `printf` 不属于内核日志）。实际上 `init: starting sh` 也不出现，因为那是用户程序输出。
@@ -568,6 +628,10 @@ priotest: OK (urgent 18 vs slack 2 ticks)
 
 ## 已知限制 / Known limitations
 
+- **页状态表占用 32 KiB 静态内存**，且只在 `kalloc`/`kfree` 的热路径上增加两次数组访问。它是调试设施：若需要，可改成每页 2 位的位图（省一半）或用编译开关关掉。
+  The state table costs 32 KiB of static memory plus two array touches per allocator call. It is a debug facility; a 2-bit-per-page bitmap would halve it, and a build flag could disable it.
+- **`pages_total` 不等于 `kalloc` 管理的页数**：它含从不进入空闲链表的内核映像页，而内核映像占多少页并未导出。任何一致性检查都必须用增量。
+- **双重释放检测只能靠审查验证**：从用户态触发它会 `panic` 并停机，无法写进自检程序。
 - **调度器每 tick 做一次 O(NPROC) 全表扫描**：择优与老化合并后仍是一次完整遍历。`NPROC = 64` 下成本可忽略，但它确实比原先"遇到第一个 `RUNNABLE` 就走"更贵。
   The scheduler walks the whole table every tick. At `NPROC = 64` the cost is negligible, but it is strictly more work than the old "run the first RUNNABLE slot found".
 - **优先级不继承**：`kfork()` 逐字段复制，子进程从 `PRIO_DEFAULT` 开始。若希望子进程继承父进程的优先级，需要显式调用 `setprio`。
@@ -594,12 +658,11 @@ priotest: OK (urgent 18 vs slack 2 ticks)
 
 ## 路线图 / Roadmap
 
-已完成批次 1–6。批次 6 的调度器优先级见本节之前那一节；批次 5 的选型讨论保留在 `docs/batch5-plan.md` 第 7 章。
+已完成批次 1–7。批次 6 的调度器优先级见本节之前那一节；批次 5 的选型讨论保留在 `docs/batch5-plan.md` 第 7 章。
 
 Batches 1-6 are complete; see the batch 6 section above.
 
-- 批次 7：`kalloc` 页状态数组（双重释放 / 泄漏检测）—— 仍属观测/调试设施，可留在当前分支
-- 批次 8+：COW fork、信号投递、`/proc` 伪文件系统 —— 均属机制类，各自另开分支
+- 批次 8+：COW fork（页状态表可扩展为引用计数的落点）、信号投递、`/proc` 伪文件系统
 
 ---
 

@@ -160,6 +160,7 @@ UPROGS=\
 	$U/_waitxtest\
 	$U/_help\
 	$U/_priotest\
+	$U/_kmemtest\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

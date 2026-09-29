@@ -201,6 +201,7 @@ sys_sysinfo(void)
   // memlayout.h so there is only one place to keep in sync.
   info.mem_total = PHYSTOP - KERNBASE;
   info.mem_free = freemem();
+  kalloc_stats(&info.pages_total, &info.pages_live, &info.alloc_calls);
   bio_stats(&info.bcache_hits, &info.bcache_misses);
   disk_stats(&info.disk_reads, &info.disk_writes);
   info.vmfaults = vmfaults();

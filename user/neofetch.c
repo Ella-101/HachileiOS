@@ -39,6 +39,8 @@ main(int argc, char *argv[])
   printf("   cpus      : %ld online of %ld max\n", si.ncpu_online, si.ncpu_max);
   printf("   memory    : %ld MB total, %ld KB free\n",
          si.mem_total / (1024 * 1024), si.mem_free / 1024);
+  printf("   pages     : %ld live of %ld (%ld kalloc calls)\n", si.pages_live,
+         si.pages_total, si.alloc_calls);
   printf("   processes : %d\n", nproc);
   printf("   disk      : %ld block reads, %ld writes\n", si.disk_reads,
          si.disk_writes);
