@@ -51,6 +51,23 @@ binit(void)
   }
 }
 
+// Buffer cache hit/miss counters for sysinfo().  Both are incremented
+// inside bget(), which already runs under bcache.lock, so they are plain
+// relaxed atomics -- adding a lock here would only invite lock-order
+// trouble (the same call made for fs_nused_blocks in fs.c).
+//
+// A miss is not a disk read: a freshly recycled buffer starts with
+// valid == 0, and only a subsequent bread() actually reads the disk.
+static uint64 bcache_hits;
+static uint64 bcache_misses;
+
+void
+bio_stats(uint64 *hits, uint64 *misses)
+{
+  *hits = __atomic_load_n(&bcache_hits, __ATOMIC_RELAXED);
+  *misses = __atomic_load_n(&bcache_misses, __ATOMIC_RELAXED);
+}
+
 // Look through buffer cache for block on device dev.
 // If not found, allocate a buffer.
 // In either case, return locked buffer.
@@ -65,6 +82,7 @@ bget(uint dev, uint blockno)
   for (b = bcache.head.next; b != &bcache.head; b = b->next) {
     if (b->dev == dev && b->blockno == blockno) {
       b->refcnt++;
+      __atomic_fetch_add(&bcache_hits, 1, __ATOMIC_RELAXED);
       release(&bcache.lock);
       acquiresleep(&b->lock);
       return b;
@@ -79,6 +97,7 @@ bget(uint dev, uint blockno)
       b->blockno = blockno;
       b->valid = 0;
       b->refcnt = 1;
+      __atomic_fetch_add(&bcache_misses, 1, __ATOMIC_RELAXED);
       release(&bcache.lock);
       acquiresleep(&b->lock);
       return b;

@@ -41,5 +41,10 @@ main()
     plicinithart(); // ask PLIC for device interrupts
   }
 
+  // Every hart reaches this point after its own initialisation is done, so
+  // the counter measures harts that are actually scheduling rather than the
+  // compile-time cap NCPU.  hart 0 arrives last, because it performs all the
+  // device setup first.
+  cpu_online_inc();
   scheduler();
 }

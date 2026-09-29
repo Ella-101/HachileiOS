@@ -6,6 +6,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "vm.h"
+#include "sysinfo.h"
 
 uint64
 sys_exit(void)
@@ -175,4 +176,35 @@ sys_klog(void)
     return -1;
 
   return n;
+}
+
+// sysinfo(info): snapshot of the system-wide counters.
+//
+// The fields are read one at a time rather than under a single lock, so
+// this is not an atomic view of the machine: by the time the last counter
+// is read the first ones may already be stale.  That is deliberate --
+// these are monotonic statistics, and a consistent snapshot would mean
+// stopping every hart.
+uint64
+sys_sysinfo(void)
+{
+  uint64 addr;
+  struct sysinfo info;
+  struct proc *p = myproc();
+
+  argaddr(0, &addr);
+
+  info.ncpu_online = ncpu_online();
+  info.ncpu_max = NCPU;
+  // Same quantity as MINIOS_MEM_TOTAL in minios.h; derived here from
+  // memlayout.h so there is only one place to keep in sync.
+  info.mem_total = PHYSTOP - KERNBASE;
+  info.mem_free = freemem();
+  bio_stats(&info.bcache_hits, &info.bcache_misses);
+  disk_stats(&info.disk_reads, &info.disk_writes);
+  info.vmfaults = vmfaults();
+
+  if (copyout(p->pagetable, p->sz, addr, (char *)&info, sizeof(info)) < 0)
+    return -1;
+  return 0;
 }

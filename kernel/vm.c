@@ -455,6 +455,20 @@ copyinstr(pagetable_t pagetable, uint64 psz, char *dst, uint64 srcva,
 // that was lazily allocated in sys_sbrk().
 // returns 0 if va is invalid or already mapped, or if
 // out of physical memory, and physical address if successful.
+// Pages mapped on demand, counted only once the mapping actually
+// succeeded, so the figure can be compared against the growth of rss.
+// Relaxed atomic: several harts fault at once and the value is only read
+// for reporting.  Note that copyin()/copyout() fault user buffers through
+// this same path, so it counts demand-paged allocations rather than
+// user-mode page faults.
+static uint64 vmfault_cnt;
+
+uint64
+vmfaults(void)
+{
+  return __atomic_load_n(&vmfault_cnt, __ATOMIC_RELAXED);
+}
+
 uint64
 vmfault(pagetable_t pagetable, uint64 psz, uint64 va, int read)
 {
@@ -474,6 +488,7 @@ vmfault(pagetable_t pagetable, uint64 psz, uint64 va, int read)
     kfree((void *)mem);
     return 0;
   }
+  __atomic_fetch_add(&vmfault_cnt, 1, __ATOMIC_RELAXED);
   return mem;
 }
 

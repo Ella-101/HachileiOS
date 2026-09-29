@@ -9,6 +9,29 @@
 
 struct cpu cpus[NCPU];
 
+// Harts that have reached scheduler().  Each hart increments this once, so
+// there is a single writer per hart and the value only ever moves forward.
+// A relaxed atomic is enough: this is a statistic, not a synchronisation
+// device -- contrast the release/acquire pair used for `started` in main.c,
+// which really does order memory between harts.
+static uint64 ncpu_online_cnt;
+
+void
+cpu_online_inc(void)
+{
+  __atomic_fetch_add(&ncpu_online_cnt, 1, __ATOMIC_RELAXED);
+}
+
+// Read by sysinfo().  This counts harts that have entered the scheduler, not
+// the number QEMU was configured with (-smp): a hart still initialising is
+// not counted yet.  Reporting what is really online is more useful than
+// echoing a compile-time constant.
+uint64
+ncpu_online(void)
+{
+  return __atomic_load_n(&ncpu_online_cnt, __ATOMIC_RELAXED);
+}
+
 // psinfo() fills a single kalloc page with one entry per process slot.
 // This fails to compile (negative array size) if that stops being true.
 typedef char

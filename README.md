@@ -51,7 +51,7 @@ The default QEMU invocation (from the `Makefile`) is `-m 128M -smp 3`.
 | `free` | 物理内存总量 / 已用 / 空闲 |
 | `dmesg` | 回放内核日志环形缓冲区 |
 | `top [n]` | 周期性刷新进程表 + CPU 增量（默认 10 次） |
-| `neofetch` | 一次性系统概览 |
+| `neofetch` | 一次性系统概览（含在线 hart 数、磁盘 I/O） |
 | `cputest [ticks]` | CPU 时间统计的自检程序（默认累计 20 tick） |
 | `df` | 文件系统用量（块 / inode） |
 | `waitxtest [ticks]` | 子进程 CPU 时间回收的自检程序（默认 5 tick） |
@@ -92,6 +92,10 @@ In the default build both `exec()` and the `sbrk()` library call allocate eagerl
 | 4 | 子进程 CPU 时间回收 / Child CPU accounting | `waitx()` (26) → `waitxtest` | ✅ 已验证 |
 | 4 | 文件系统用量 / File system usage | `fsinfo()` (27) → `df` | ✅ 已验证 |
 | 4 | 命令索引 / Command index | `help` | ✅ 已验证 |
+| 5 | 数据块口径 / Data-block view | `fsinfo` 扩展字段 → `df` | ✅ 已验证 |
+| 5 | 运行时在线 hart 数 / Online hart count | `sysinfo()` (28) → `neofetch` | ✅ 已验证 |
+| 5 | 磁盘 I/O 与缓存命中 / Disk I/O & cache hits | `sysinfo()` (28) → `neofetch` | ✅ 已验证 |
+| 5 | 按需分页计数 / Demand paging count | `sysinfo()` (28) → `neofetch` | ✅ 已验证 |
 
 ---
 
@@ -290,6 +294,52 @@ Three decisions worth spelling out:
 
 ---
 
+### 批次 5 — 系统信息与运行时计数器 / Batch 5 — System info & runtime counters
+
+批次 5 先补齐批次 4 遗留的两个口径问题（`df` 的元数据口径、编译期 hart 数），再把新增的**事件计数**统一到一个系统调用下。
+
+Batch 5 closed the two gaps batch 4 left open (the metadata figure in `df`, the compile-time hart count), then funnelled the new *event* counters through a single call.
+
+**`sysinfo()` 系统调用（`SYS_sysinfo = 28`）**
+
+- 原型 / Prototype: `int sysinfo(struct sysinfo *info);` —— 布局在共享头 `kernel/sysinfo.h`。
+- 与 `struct psinfo` 的关键差别：它是**单个结构体而非进程表快照**，因此**没有页大小约束**，可以随时追加字段。
+  Unlike `struct psinfo` this is a single struct, not a process-table snapshot, so it carries **no page-size constraint** and fields can be appended freely.
+
+| 字段 / Field | 来源 / Source |
+| --- | --- |
+| `ncpu_online` | 每个 hart 进入 `scheduler()` 前自增的计数器（`kernel/proc.c`） |
+| `ncpu_max` | 编译期上限 `NCPU` |
+| `mem_total` / `mem_free` | `PHYSTOP - KERNBASE` / `freemem()` |
+| `disk_reads` / `disk_writes` | `virtio_disk_rw()` 入口，按读写分流（`kernel/virtio_disk.c`） |
+| `bcache_hits` / `bcache_misses` | `bget()` 命中分支 / 需要取空槽的分支（`kernel/bio.c`） |
+| `vmfaults` | `vmfault()` 中 `mappages()` 成功之后（`kernel/vm.c`） |
+
+- **所有计数器都是 relaxed atomic，理由相同**：计数点已经在各自的临界区内（`bget()` 在 `bcache.lock` 内），而读者只要一个单调快照，在此加锁只会引入锁序反转风险。
+  Every counter is a relaxed atomic for the same reason: the increment sites already sit inside their own critical section, and a reader only wants a monotonic snapshot.
+- **`vmfaults` 计在成功映射之后**，因此它等于"新映射的页数"，可以直接与 `rss` 的增长对照；计在函数入口则会把 `va >= psz` 与 `ismapped()` 这两种无效调用也算进去。
+  Counting after `mappages()` succeeds makes the figure mean "pages newly mapped", comparable against the growth of `rss`.
+- **`ncpu_online` 报的是"已进入调度器"的 hart 数**，不是 `-smp` 配置值：hart 0 因先完成设备初始化而最后到达。观测真实在线比回显一个编译期常量更有价值。
+  `ncpu_online` counts harts that have *reached the scheduler*, not the `-smp` setting; hart 0 arrives last because it performs all device setup first.
+
+**`nmeta`：`df` 的数据块口径 / A data-block view for `df`**
+
+`struct fsstat` 增加 `nmeta`，由 `fsinfo()` 用 `sb.size - sb.nblocks` 得出 —— 这正是 mkfs 自己的算法（`nblocks = FSSIZE - nmeta`），复用它比在核心里重算 inode 块与位图块数更不容易漂移。`df` 现在同时打印"整盘"与"数据块"两组读数。
+
+  `struct fsstat` gained `nmeta`, derived as `sb.size - sb.nblocks` — exactly how mkfs splits the image — and `df` prints both the whole-image and data-block views.
+
+> 两种口径的 `free` 值必然相同：元数据块在同一张位图里被标记为已用，空闲块不可能落在元数据区。这不是打印错误。
+> The two views must agree on `free`: metadata blocks are marked allocated in the same bitmap, so no free block can lie there.
+
+**验证上的一个新情况 / A new verification situation**
+
+`disk_reads` / `bcache_hits` 这类**事件计数没有可扫描的 O(N) 真值**，因此无法沿用 `freemem_walk()` / `fscount_walk()` 那套对照法，只能靠同层恒真不变式（`hits + misses == bget()` 调用次数）与行为对照。这是本项目首个无法用参考实现校验的能力。
+
+  These event counters have no scanable O(N) ground truth, so the `freemem_walk()` / `fscount_walk()` cross-check does not apply. Same-layer invariants and behavioural comparison are all there is.
+
+---
+
+
 ## 新增系统调用 / New system calls
 
 | 编号 | 名称 | 用户态原型 | 返回 |
@@ -299,6 +349,7 @@ Three decisions worth spelling out:
 | 25 | `SYS_klog` | `int klog(char *buf, int max, uint64 *seq, uint64 *lost)` | 复制字节数，或 `-1` |
 | 26 | `SYS_waitx` | `int waitx(int *status, uint64 *utime, uint64 *ktime)` | 子进程 pid，或 `-1` |
 | 27 | `SYS_fsinfo` | `int fsinfo(struct fsstat *st)` | `0`，或 `-1` |
+| 28 | `SYS_sysinfo` | `int sysinfo(struct sysinfo *info)` | `0`，或 `-1` |
 
 编号定义在 `kernel/syscall.h`，分发表在 `kernel/syscall.c`，实现在 `kernel/sysproc.c`，用户桩由 `user/usys.pl` 生成。
 
@@ -314,7 +365,8 @@ Numbers live in `kernel/syscall.h`, the dispatch table in `kernel/syscall.c`, th
 | --- | --- |
 | `kernel/psinfo.h` | `struct psinfo` 布局 + `PSTATE_*` 常量，内核/用户共享 |
 | `kernel/minios.h` | `MINIOS_MEM_TOTAL` 等共享常量 |
-| `kernel/fsstat.h` | `struct fsstat` 布局，内核/用户共享 |
+| `kernel/fsstat.h` | `struct fsstat` 布局（含 `nmeta` 元数据块数），内核/用户共享 |
+| `kernel/sysinfo.h` | `struct sysinfo` 布局，内核/用户共享 |
 | `user/ps.c` | 进程列表 |
 | `user/free.c` | 内存用量 |
 | `user/dmesg.c` | 内核日志回放 |
@@ -330,13 +382,16 @@ Numbers live in `kernel/syscall.h`, the dispatch table in `kernel/syscall.c`, th
 | 文件 | 改动 |
 | --- | --- |
 | `kernel/kalloc.c` | `kmem.nfree` O(1) 计数器；`freemem()`、`freemem_walk()` |
-| `kernel/vm.c` | `vm_rss()` 驻留页统计（递归遍历三级页表） |
-| `kernel/fs.c` | O(1) 块/inode 计数器；`fscount_scan()`、`fscount_walk()`、`fsinfo()` |
+| `kernel/vm.c` | `vm_rss()` 驻留页统计（递归遍历三级页表）；`vmfaults()` 按需分页计数 |
+| `kernel/fs.c` | O(1) 块/inode 计数器；`fscount_scan()`、`fscount_walk()`、`fsinfo()`（含 `nmeta` 推导） |
 | `kernel/printk.c` | 无锁日志环形缓冲区；`kputc()` tee；`klog_read()` |
 | `kernel/proc.h` | `struct proc` 增加 `u_ticks` / `k_ticks` / `xutime` / `xktime` |
-| `kernel/proc.c` | `allocproc()` 清零计数；`psinfo()` 快照 + 编译期页大小断言 |
+| `kernel/proc.c` | `allocproc()` 清零计数；`psinfo()` 快照 + 编译期页大小断言；`cpu_online_inc()`/`ncpu_online()` |
 | `kernel/trap.c` | `clockintr()` 按 hart 计费并拆分为用户/内核态 |
-| `kernel/sysproc.c` | `sys_psinfo` / `sys_freemem` / `sys_klog` |
+| `kernel/sysproc.c` | `sys_psinfo` / `sys_freemem` / `sys_klog` / `sys_sysinfo` |
+| `kernel/main.c` | 每个 hart 进入 `scheduler()` 前调用 `cpu_online_inc()` |
+| `kernel/bio.c` | `bcache_hits` / `bcache_misses` 计数器与 `bio_stats()` |
+| `kernel/virtio_disk.c` | `disk_reads_cnt` / `disk_writes_cnt` 计数器与 `disk_stats()` |
 | `kernel/syscall.h` / `.c` | 新系统调用编号与分发表 |
 | `kernel/defs.h` | 新函数原型 |
 | `user/user.h` / `usys.pl` | 新系统调用声明与桩 |
@@ -397,10 +452,12 @@ Every tick is charged exactly once, so `user + sys == elapsed`.
 
 ```sh
 $ df
-         total        used        free
-blocks  2000  1328  672
-bytes   2048000  1359872  688128
-66% of the image is in use (1024-byte blocks)
+              total  used  free
+image  blocks  2000  1328  672
+       bytes   2048000  1359872  688128
+data   blocks  1953  1281  672
+       bytes   1999872  1311744  688128
+66% of the image is in use; 47 blocks are metadata
 inodes  200 total, 32 used, 168 free
 ```
 
@@ -408,9 +465,32 @@ inodes  200 total, 32 used, 168 free
 
 These are the numbers for a freshly built image after its first boot: of the 1328 used blocks, 47 are metadata marked by mkfs (boot/super/log/inode/bitmap) and the other 1281 hold `README` and the 29 user programs.
 
+`nmeta` comes straight from the superblock: mkfs sets `nblocks = size - nmeta`, so the kernel derives it as `sb.size - sb.nblocks` instead of re-deriving the inode and bitmap block counts, which would drift if either constant changed.
+
+两种口径共享同一个 free 值：元数据块全部标记为已用，空闲块不可能落在元数据区，所以“整盘”与“数据块”两种视角下的 free 必定相同——这不是打印错误。
+
 O(1) 计数器的正确性靠对照 O(N) 参考实现来校验：在内核里临时把 `fsinfo()` 改为调用 `fscount_walk()`，在同一次启动后两者必须完全一致（实测两侧都是 `1328` 块 / `32` inode）。这与批次 1 用 `freemem_walk()` 校验 `freemem()` 的做法相同。
 
 Validate the O(1) counters the same way batch 1 validated `freemem()`: temporarily make `fsinfo()` call `fscount_walk()` instead; on the same boot the two must agree exactly (measured: both report 1328 blocks / 32 inodes).
+
+**系统信息 / System summary**
+
+```sh
+$ neofetch
+   cpus      : 3 online of 8 max
+   memory    : 128 MB total, 118000 KB free
+   disk      : 412 block reads, 8 writes
+   bcache    : 61 hits, 57 misses
+   vmfaults  : 0
+```
+
+（示意输出，数值随运行状态变化）
+`ncpu_online` 由每个 hart 在进入 `scheduler()` 前自增一次，因此它报的是**实际在调度**的 hart 数，而不是编译期上限 `NCPU`；用 `make qemu CPUS=1` 与 `CPUS=4` 各跑一次即可验证读数随之变化。
+
+`disk_stats()` 计的是 `virtio_disk_rw()` 的真实传输次数，`bio_stats()` 计的是 `bget()` 的逻辑访问是否命中，两者的差额正是缓冲缓存省下的 I/O。**这一项没有 O(N) 参考实现可对照**（事件计数不存在可扫描的真值），只能靠同层恒真不变式（`hits + misses == bget()` 调用次数）与行为对照来验证。
+
+Validate the cache counters through their same-layer invariants instead of an O(N) walk: `bcache_hits + bcache_misses` must equal the number of `bget()` calls, and `disk_reads + disk_writes` must equal the number of `virtio_disk_rw()` calls. Run `ls` twice and the second run should add cache hits with almost no disk reads.
+
 
 **子进程 CPU 时间回收 / Child CPU reaping**
 
@@ -439,8 +519,6 @@ waitxtest: OK
 
 ## 已知限制 / Known limitations
 
-- **`neofetch` 报告的 CPU 数是编译期上限 `NCPU`（8），不是当前在线的 hart 数**（默认启动 `-smp 3`）。xv6 未导出运行时的 hart 数量。
-  `neofetch` prints the compile-time `NCPU` (8), not the number of online harts (`-smp 3` by default); xv6 does not export the runtime hart count.
 - **`psinfo()` 的成本随进程规模增长**：快照期间会对每个进程持 `p->lock` 遍历页表树，因此映射页很多的进程会让 `psinfo()` 变慢，而 `top` 每轮都要做一次。这里不能改成「先释放锁再遍历」——那样页表可能被并发释放；这是必要权衡，不是疏漏。
   `psinfo()` walks each process's page table while holding `p->lock`, so its cost grows with what is mapped and `top` pays it every refresh. It cannot drop the lock first, since the table could be torn down underneath it.
 
@@ -450,8 +528,6 @@ waitxtest: OK
   There is no room left in `struct psinfo`: with `rss` its size is exactly 64 and `64 * NPROC == PGSIZE`. Adding a field fails to compile by design.
 - **`waitx` 的账目可能少一格 tick**：冻结发生在退出路径末尾，此后到 `sched()` 之间若有定时器中断，那一格不会被任何人记录。这是 tick 级采样精度的固有边界。
   `waitx` accounting can be one tick short: the freeze happens at the end of the exit path, and a timer interrupt after it is charged to nobody. This is inherent to tick-granularity sampling.
-- **`df` 的 `total` 是整盘块数而非"可放数据的块数"**：mkfs 把元数据块也在同一张位图里标记为已用，因此它们计入 used。这与 Linux `df` 的语义略窄 —— 想看数据块余量，应从 total 中扣掉 `nmeta`。
-  `df`'s `total` counts the whole image, not only data blocks: mkfs marks metadata blocks used in the same bitmap. The narrower "data blocks remaining" figure would subtract `nmeta`.
 - CPU 时间是**采样**得到：内核把 tick 记给被中断的那个进程，因此单次连续占用不足 1 tick（100 ms）的进程可能显示为 0。
   CPU time is **sampled**: a process that burns less than one tick (100 ms) at a stretch may show up as 0.
 - `uptime()`（全局 `ticks`）只在 hart 0 上递增，而被统计的进程可能运行在任意 hart 上，因此两者之间存在少量偏斜；`cputest` 的容差 `TOLERANCE = 4` 即为此设置。
@@ -463,13 +539,13 @@ waitxtest: OK
 
 ## 路线图 / Roadmap
 
-已完成批次 1–4。后续候选方向（尚未排期）：
+已完成批次 1–5。批次 6 选定**调度器优先级**（含本项目第一个写型 syscall `setprio()`），选型理由与实施方案见 `docs/batch5-plan.md` 第 7 章。
 
-Batches 1-4 are complete. Candidate directions not yet scheduled:
+Batches 1-5 are complete. Batch 6 is slated for **scheduler priorities** (including `setprio()`, the first syscall in this project that writes kernel state); see `docs/batch5-plan.md` §7 for the rationale and the plan.
 
-- `kalloc` 调试设施（双重释放 / 泄漏检测）、运行时在线 hart 数 —— 批次 5
-- 磁盘 I/O 计数（`bio.c` 累计读写块数）—— 批次 5
-- 其他子系统（调度器优先级、信号、COW fork）—— 批次 6+，工作量显著更大
+- 批次 6：调度器优先级（带老化，避免饥饿）+ `setprio(pid, prio)`
+- 批次 7：`kalloc` 页状态数组（双重释放 / 泄漏检测）
+- 批次 8+：COW fork、信号投递、`/proc` 伪文件系统
 
 ---
 

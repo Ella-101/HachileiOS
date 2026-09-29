@@ -212,10 +212,31 @@ alloc3_desc(int *idx)
   return 0;
 }
 
+// Physical block I/O counters for sysinfo().  Counted at the entry to
+// virtio_disk_rw(), the single choke point every real transfer goes
+// through: the buffer cache above it may serve a request with no I/O at
+// all, which is exactly the difference these counters expose.  Relaxed
+// atomics -- several harts call this at once and the values are only read
+// for reporting.
+static uint64 disk_reads_cnt;
+static uint64 disk_writes_cnt;
+
+void
+disk_stats(uint64 *reads, uint64 *writes)
+{
+  *reads = __atomic_load_n(&disk_reads_cnt, __ATOMIC_RELAXED);
+  *writes = __atomic_load_n(&disk_writes_cnt, __ATOMIC_RELAXED);
+}
+
 void
 virtio_disk_rw(struct buf *b, int write)
 {
   uint64 sector = b->blockno * (BSIZE / 512);
+
+  if (write)
+    __atomic_fetch_add(&disk_writes_cnt, 1, __ATOMIC_RELAXED);
+  else
+    __atomic_fetch_add(&disk_reads_cnt, 1, __ATOMIC_RELAXED);
 
   acquire(&disk.vdisk_lock);
 

@@ -48,3 +48,4 @@ entry("freemem");
 entry("klog");
 entry("waitx");
 entry("fsinfo");
+entry("sysinfo");

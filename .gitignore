@@ -10,3 +10,10 @@ _*
 /user/usys.S
 .gdbinit
 TAGS
+
+# WorkBuddy assistant working directory: project memory, local static
+# verification tools, and backup copies of sources taken before edits.
+.workbuddy/
+
+# Written by test-xv6.py on every run.
+test-xv6.out
