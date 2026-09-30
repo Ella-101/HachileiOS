@@ -8,6 +8,22 @@
 
 本项目以 MIT 6.1810 教学操作系统 **xv6-riscv**（`riscv` 分支，基线 HEAD `9e3161a`）为起点，逐步演进为一个 "miniOS"。目标不是做一个"看起来像操作系统"的演示，而是以**可快速追加、可独立验证**的小步前进方式，补全操作系统概念（进程、内存、锁、日志、CPU 统计），并在每一步都保留真实的工程权衡。
 
+### 当前进度（2026-09-30）
+
+已完成批次 1–8，以及 miniOS 路线图的**阶段一：自动化验证**。本批新增
+`testrun` 退出状态报告器和 `mixstress` 组合压力测试，自动运行 6 个专用
+测试，并配置 Linux 单核/三核 CI、超时、串口日志和 JSON 结果汇总。
+
+本地验收通过：19 项宿主测试、单核/三核各 10 轮共 120 项专用测试、
+两种配置的完整 `usertests` 和全部崩溃恢复测试。故障注入验证了失败检测、
+超时和 QEMU 进程清理。详细结果及环境限制见
+[阶段一验证记录](docs/stage1-validation.md)。远端构建和测试状态以
+[GitHub Actions](https://github.com/Miusdy/HachileiOS/actions/workflows/test.yml)
+为准，本地通过不代表远端 CI 已通过。
+
+下一阶段是信号与终端作业控制，之后实现身份与权限；这些功能尚未实现。
+完整范围见 [miniOS 路线图](docs/minios-roadmap.md)。
+
 ### 设计原则
 
 - 每次只加一个能独立验证的能力
@@ -48,11 +64,13 @@ make clean         # 清理构建产物
 | `df` | 文件系统用量（块 / inode） |
 | `waitxtest [ticks]` | 子进程 CPU 时间回收的自检程序（默认 5 tick） |
 | `help [command]` | 命令索引；列出可用命令并标注是 xv6 原版还是 miniOS 新增 |
-| `priotest [ticks]` | 调度优先级与老化的自检程序（默认各跑 20 tick） |
+| `priotest [ticks]` | 调度优先级与老化的自检程序（默认每核两个进程竞争 60 tick） |
 | `kmemtest` | 分配器会计与泄漏的自检程序 |
+| `mixstress` | 并发 fork/wait、管道、COW、文件创建/删除的组合压力测试 |
+| `testrun program [args...]` | 宿主测试使用的退出状态报告器 |
 | `cowtest` | 写时复制 fork 的自检程序（共享代价、写隔离、copyout 与三代共享）|
 
-镜像里共有 **32** 个用户程序（即 `UPROGS` 的 32 项）。不带参数运行 `help` 会按类别列出其中 **31 条**——除 `help` 自身以外的全部命令——并把 miniOS 新增的 11 条用 `*` 标出；`help ps` 则只显示该命令的用法与补充细节。`help` 本身是 miniOS 的第 12 个新增程序，没有把自己列进索引（一个刻意的取舍），但它与其他命令一样只是根目录里的普通程序，`ls` 能看到它。xv6 的 shell 没有内建命令，因此命令索引本身也只能是一个普通程序。
+镜像里共有 **34** 个用户程序（即 `UPROGS` 的 34 项）。不带参数运行 `help` 会按类别列出其中 **33 条**——除 `help` 自身以外的全部命令——并把 miniOS 新增的 13 条用 `*` 标出；`help ps` 则只显示该命令的用法与补充细节。`help` 本身是 miniOS 的 14 个新增程序之一，没有把自己列进索引（一个刻意的取舍），但它与其他命令一样只是根目录里的普通程序，`ls` 能看到它。Shell 内建 `cd`；其余命令通常通过 exec 运行。
 
 ```
 $ ps
@@ -378,7 +396,7 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 | `cow_faults` | 被 `cowfault()` 解决的写缺页数 |
 | `cow_copies` | 其中真正拷了一页的次数 |
 
-`pages_shared` 与 `pages_shared_ref` 是本项目第三组"O(1) 计数器 vs O(N) 参考实现"（前两组是 `freemem`/`freemem_walk`、`fsinfo`/`fscount_walk`），区别在于这两个数由**同一次系统调用**返回，因而可以互相比较 —— 分成两次调用会引入时间窗。代价是每次 `sysinfo()` 都要在持 `kmem.lock` 时扫 32 KiB 状态表，只有 `neofetch`、`kmemtest`、`cowtest` 三个程序付这个代价。`cow_faults` 与 `cow_copies` 的差值本身即观测量：它统计"因对方已退出而省掉的拷贝次数"。
+`pages_shared` 与 `pages_shared_ref` 是本项目第三组"O(1) 计数器 vs O(N) 参考实现"（前两组是 `freemem`/`freemem_walk`、`fsinfo`/`fscount_walk`），区别在于这两个数由**同一次系统调用**返回，因而可以互相比较 —— 分成两次调用会引入时间窗。代价是每次 `sysinfo()` 都要在持 `kmem.lock` 时扫 32 KiB 状态表，`neofetch`、`kmemtest`、`cowtest` 和 `priotest` 会承担这个代价。`cow_faults` 与 `cow_copies` 的差值本身即观测量：它统计"因对方已退出而省掉的拷贝次数"。
 
 **自检**
 
@@ -458,7 +476,7 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 | `kernel/syscall.h` / `.c` | 新系统调用编号与分发表 |
 | `kernel/defs.h` | 新函数原型 |
 | `user/user.h` / `usys.pl` | 新系统调用声明与桩 |
-| `Makefile` | `UPROGS` 增加 12 个用户程序（`ps` / `free` / `dmesg` / `top` / `neofetch` / `cputest` / `df` / `waitxtest` / `help` / `priotest` / `kmemtest` / `cowtest`） |
+| `Makefile` | 批次 1–8 的 `UPROGS` 增加 12 个用户程序（`ps` / `free` / `dmesg` / `top` / `neofetch` / `cputest` / `df` / `waitxtest` / `help` / `priotest` / `kmemtest` / `cowtest`） |
 
 ---
 
@@ -482,7 +500,31 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 
 ## 验证
 
-**回归测试**
+**自动回归入口**
+
+需要 Python 3、QEMU ≥ 7.2、RISC-V GCC/binutils、GNU make 和 bc。
+
+```sh
+python3 test-harness.py                        # 宿主错误路径回归
+./test-xv6.py dedicated --cpus 1 --repeat 10   # 连续验收，失败即停
+./test-xv6.py dedicated --cpus 3 --repeat 10
+./test-xv6.py cowtest --cpus 3                  # 单个专用测试
+./test-xv6.py usertests --cpus 1               # 完整回归
+./test-xv6.py usertests --cpus 3
+./test-xv6.py crash --cpus 1
+./test-xv6.py crash --cpus 3
+```
+
+`dedicated` 包含 cowtest、kmemtest、waitxtest、cputest、priotest、mixstress。
+每个专用测试默认超时 120 秒，可用 `--timeout` 调整；完整 usertests 为
+600 秒。`--repeat` 表示重复验证，绝不自动重试失败。
+每次运行重新生成 fs.img，会覆盖镜像中的手工文件；同一目录不要并行测试。
+串口、QEMU 命令、来宾命令、CPU 配置、提交及工作区状态和 JSON 汇总保存到
+`test-results/`（可用 `--artifacts` 指定），`test-xv6.out` 保留最近一次串口。
+Linux CI 在 1/3 核上分别执行全部测试并上传日志，任务上限 30 分钟；macOS 仅构建。
+专用测试同时检查成功标记、退出码和 Shell 返回；异常时关闭 QEMU 进程组。
+
+**手工回归测试**
 
 ```sh
 make clean && make && make fs.img
@@ -507,7 +549,7 @@ cputest:   sys = 95% of elapsed
 cputest: OK
 ```
 
-每一格 tick 恰好被记一次（`user + sys == elapsed`）。
+CPU 时间是采样值，与 uptime 存在核间偏斜；自检允许 4 tick 误差，不能保证每次 `user + sys == elapsed`。
 
 **文件系统用量**
 
@@ -522,7 +564,7 @@ data   blocks  1953  1281  672
 inodes  200 total, 32 used, 168 free
 ```
 
-这是刚 `make fs.img` 出来的镜像首次启动后的读数：1328 个已用块里有 47 块是 mkfs 标出的元数据（boot / super / log / inode / 位图），其余 1281 块存放 `README` 与 29 个用户程序。
+这是早期版本镜像首次启动后的历史示例，当前镜像已含 34 个程序，用量会变化：1328 个已用块里有 47 块是 mkfs 标出的元数据（boot / super / log / inode / 位图），其余 1281 块存放 `README` 与 29 个用户程序。
 
 两种口径共享同一个 free 值：元数据块全部标记为已用，空闲块不可能落在元数据区，所以"整盘"与"数据块"两种视角下的 free 必定相同——这不是打印错误。
 
@@ -567,7 +609,7 @@ priotest: slack  (prio 9): user 2 sys 0
 priotest: OK (urgent 18 vs slack 2 ticks)
 ```
 
-（示意输出，具体数值随运行状态变化）紧急进程获得约 9 倍于松弛进程的 CPU，而松弛进程仍被老化保证运行 —— 两个断言缺一不可。
+（示意输出，具体数值随运行状态变化）历史单核示例；当前测试按在线核心数创建每核一对进程，比较两组总 CPU 时间，要求每个进程都有进展，不断言固定倍率。
 
 `prio` 列可直接在 `ps` 里观察：新进程都是 `PRIO_DEFAULT`(5)，`setprio` 之后立即改变。若把 `PRIO_LOWEST` 调到很大的值（例如把范围改成 0..99），可以观察到松弛进程的等待轮数随之线性增长 —— 老化比例由范围宽度决定。
 
@@ -603,8 +645,11 @@ kmemtest: OK (conserved, no leak over 3 rounds)
 
 ## 已知限制
 
+- 教学配置为最多 64 个进程、每进程 16 个文件描述符、约 2 MiB 文件系统；扩大容量需要同时评估日志、缓存和内存。
+- 尚无用户身份/访问权限、信号处理器和终端作业控制；Ctrl-C 不能中断前台任务，`top` 仍有界运行。
+
 - **`PTE_COW` 可以在引用计数为 1 时仍然挂着**：子进程退出后父进程的页保持"只读 + COW"标记，下一次写由 `cowfault()` 的快捷路径就地修好、不产生拷贝。因此任何查看 PTE 的代码都不该假设"只读页一定没有 `PTE_COW`"，而 `psinfo()`/`vm_rss()` 这类只读遍历不受影响。
-- **`sysinfo()` 多了一次 O(NPAGE) 的扫描**：`pages_shared_ref` 为了与 O(1) 计数器可比，必须在同一次调用里扫完 32 KiB 状态表，且全程持 `kmem.lock`。这是跨校验的代价，只有 `neofetch` / `kmemtest` / `cowtest` 三个调用者承担。
+- **`sysinfo()` 多了一次 O(NPAGE) 的扫描**：`pages_shared_ref` 为了与 O(1) 计数器可比，必须在同一次调用里扫完 32 KiB 状态表，且全程持 `kmem.lock`。这是跨校验的代价，由 `neofetch` / `kmemtest` / `cowtest` / `priotest` 四个调用者承担。
 - **`neofetch` 的 `sharing` 行在常规 shell 下通常读数为 0**：xv6 的 shell 走 fork + exec，子进程一 exec 就放弃了共享页。它非零的时候意味着**此刻有子进程正共享着父进程的页**；想看它动起来，请跑 `cowtest`。相比之下 `refs` 是累计值，会随每次 fork 单调增长。
 - **页引用计数只有 1 字节**：上限 255，`kref()` 里用一次 `panic` 守住回绕。`NPROC = 64` 意味着上限远够用，但这是一个被写死的耦合 —— 若把 `NPROC` 提到 255 以上就必须换宽度。
 - **页状态表占用 32 KiB 静态内存**，且只在 `kalloc`/`kfree` 的热路径上增加两次数组访问。它是调试设施：若需要，可改成每页 2 位的位图（省一半）或用编译开关关掉。
@@ -629,7 +674,7 @@ kmemtest: OK (conserved, no leak over 3 rounds)
 
 已完成批次 1–8。批次 6 的调度器优先级与批次 8 的写时复制 fork 见其各自的小节；批次 5 的选型讨论保留在 `docs/batch5-plan.md` 第 7 章。
 
-- 批次 9+：信号投递（唯一能解锁"可被中断的用户程序"的机制）、`/proc` 伪文件系统，以及把页引用计数换成 `int` 之类的可选清理
+[miniOS 路线图](docs/minios-roadmap.md) 的阶段一自动化验证已完成，本地验收见 [验证记录](docs/stage1-validation.md)。接下来实施信号与终端作业控制，再补充身份与权限；虚拟内存、存储和网络扩展单独选型。
 
 ---
 

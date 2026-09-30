@@ -3,17 +3,34 @@ on: [push, pull_request]
 jobs:
   linux:
     runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cpus: [1, 3]
+    env:
+      CPUS: ${{ matrix.cpus }}
     steps:
       - uses: actions/checkout@v7
       - run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu qemu-system-riscv clang-format bc
       - run: make fmt && git diff --exit-code
       - run: python3 test-harness.py
       - run: make kernel/kernel fs.img
+      - run: ./test-xv6.py dedicated
       - run: ./test-xv6.py usertests
       - run: ./test-xv6.py crash
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-cpu${{ matrix.cpus }}
+          path: |
+            test-results/
+            test-xv6.out
+          if-no-files-found: warn
 
   macos:
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - run: brew install riscv64-elf-gcc

@@ -128,5 +128,5 @@ main(int argc, char *argv[])
   if (sink == 42)
     printf("cputest: impossible\n");
 
-  exit(0);
+  exit(ok ? 0 : 1);
 }

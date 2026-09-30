@@ -1,93 +1,77 @@
-// priotest: check that the scheduler honours priorities, and that the aging
-// pass keeps a low-priority process from starving.
-//
-// Two children spin in user space for the same number of timer ticks.  The
-// parent gives one the most urgent priority and the other the least urgent,
-// drops itself to the slack end so it does not compete, and then compares the
-// two children's CPU time with waitx().  The urgent child must come out
-// clearly ahead; the slack child must still get CPU, or aging is broken.
-//
-// Note that kfork() copies fields individually rather than the whole proc
-// struct, so a new process starts at PRIO_DEFAULT instead of inheriting its
-// parent's priority -- which is why each child sets its own here.
-
+// Over-subscribe all online CPUs; compare aggregate CPU time, not wall speed.
 #include "kernel/types.h"
-#include "kernel/psinfo.h"
+#include "kernel/param.h"
 #include "user/user.h"
 
-#define SETTLE 3 // ticks both children wait so they start together
-
 static void
-spin(int ticks)
+check(int ok, char *what)
 {
-  int start = uptime();
-  while (uptime() - start < ticks)
-    ;
+  if (!ok) {
+    fprintf(2, "priotest: FAIL %s\n", what);
+    exit(1);
+  }
 }
 
 int
-main(int argc, char *argv[])
+main(int argc, char **argv)
 {
-  int ticks = 20;
-  int i, pid, status, high, low;
-  uint64 uh = 0, ul = 0, kh = 0, kl = 0;
-
-  if (argc > 1)
-    ticks = atoi(argv[1]);
-  if (ticks < 5)
-    ticks = 5;
-
-  high = fork();
-  if (high == 0) {
-    setprio(getpid(), PRIO_HIGHEST);
-    pause(SETTLE);
-    spin(ticks);
-    exit(0);
-  }
-
-  low = fork();
-  if (low == 0) {
-    setprio(getpid(), PRIO_LOWEST);
-    pause(SETTLE);
-    spin(ticks);
-    exit(0);
-  }
-
-  if (high < 0 || low < 0) {
-    fprintf(2, "priotest: fork failed\n");
-    exit(1);
-  }
-
-  // Get out of the way: the parent must not compete for the CPU it is
-  // trying to measure.
-  setprio(getpid(), PRIO_LOWEST);
-  pause(SETTLE + ticks + 5);
-
-  for (i = 0; i < 2; i++) {
-    uint64 u = 0, k = 0;
-    pid = waitx(&status, &u, &k);
-    if (pid == high) {
-      uh = u;
-      kh = k;
-    } else if (pid == low) {
-      ul = u;
-      kl = k;
+  struct sysinfo si;
+  int ready[2], gate[2], pids[2 * NCPU], status;
+  uint64 high = 0, low = 0;
+  int ticks = argc > 1 ? atoi(argv[1]) : 60;
+  if (ticks < 40)
+    ticks = 40;
+  check(sysinfo(&si) == 0, "sysinfo");
+  int count = 2 * si.ncpu_online;
+  check(count >= 2 && count <= 2 * NCPU, "cpu count");
+  check(pipe(ready) == 0 && pipe(gate) == 0, "pipe");
+  for (int i = 0; i < count; i++) {
+    pids[i] = fork();
+    check(pids[i] >= 0, "fork");
+    if (pids[i] == 0) {
+      close(ready[0]);
+      close(gate[1]);
+      check(setprio(getpid(), i % 2 ? PRIO_LOWEST : PRIO_HIGHEST) == 0,
+            "setprio");
+      check(write(ready[1], "r", 1) == 1, "ready");
+      close(ready[1]);
+      int end;
+      check(read(gate[0], &end, sizeof(end)) == sizeof(end), "gate");
+      close(gate[0]);
+      volatile int sink = 0;
+      while (uptime() < end)
+        for (int j = 0; j < 100000; j++)
+          sink++;
+      exit(0);
     }
   }
-
-  printf("priotest: urgent (prio %d): user %ld sys %ld\n", PRIO_HIGHEST, uh,
-         kh);
-  printf("priotest: slack  (prio %d): user %ld sys %ld\n", PRIO_LOWEST, ul, kl);
-
-  if (uh <= ul) {
-    printf("priotest: FAIL urgent process did not get more CPU\n");
-    exit(1);
+  close(ready[1]);
+  close(gate[0]);
+  for (int i = 0; i < count; i++) {
+    char c;
+    check(read(ready[0], &c, 1) == 1, "ready read");
   }
-  if (ul == 0) {
-    printf("priotest: FAIL slack process starved; aging is not working\n");
-    exit(1);
+  close(ready[0]);
+  int end = uptime() + ticks;
+  for (int i = 0; i < count; i++)
+    check(write(gate[1], &end, sizeof(end)) == sizeof(end), "release");
+  close(gate[1]);
+  for (int i = 0; i < count; i++) {
+    uint64 u, k;
+    int pid = waitx(&status, &u, &k), slot;
+    check(pid > 0 && status == 0, "waitx");
+    for (slot = 0; slot < count && pids[slot] != pid; slot++)
+      ;
+    check(slot < count, "unexpected child");
+    check(u + k > 0, "starvation");
+    if (slot % 2)
+      low += u + k;
+    else
+      high += u + k;
   }
-
-  printf("priotest: OK (urgent %ld vs slack %ld ticks)\n", uh, ul);
+  printf("priotest: %d workers, urgent %ld slack %ld ticks\n", count, high,
+         low);
+  check(high > low, "urgent group did not get more CPU");
+  printf("priotest: OK\n");
   exit(0);
 }

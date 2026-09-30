@@ -17,3 +17,7 @@ TAGS
 
 # Written by test-xv6.py on every run.
 test-xv6.out
+
+# Host validation artifacts.
+test-results/
+__pycache__/

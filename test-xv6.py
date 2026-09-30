@@ -8,8 +8,9 @@
 # ./test-xv6.py crash  (runs the crash tests)
 # ./test-xv6.py log (runs the log crash test)
 
-import argparse, os, inspect, json, re, signal, socket, struct, subprocess, sys, tempfile, time
+import argparse, os, json, re, signal, socket, struct, subprocess, sys, tempfile, time
 from subprocess import run
+from pathlib import Path
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -17,13 +18,25 @@ parser = argparse.ArgumentParser()
 parser.add_argument('testrex', help="test name or regular expression")
 parser.add_argument("-q", action='store_true', help="usertests quick")
 
+parser.add_argument("--cpus", type=int, choices=(1, 3), default=int(os.environ.get("CPUS", "3")))
+parser.add_argument("--repeat", type=int, default=1)
+parser.add_argument("--timeout", type=float, default=120, help="dedicated test timeout in seconds")
+parser.add_argument("--artifacts", default="test-results")
+config = argparse.Namespace(cpus=int(os.environ.get("CPUS", "3")), artifacts="test-results")
+sessions = []
+
 class QEMU(object):
 
     def __init__(self, reset=False, control=False):
+        self.commands = []
+        self.logbase = Path(config.artifacts) / (str(time.time_ns()) + "-cpu" + str(config.cpus))
+        self.logbase.parent.mkdir(parents=True, exist_ok=True)
+        sessions.append(str(self.logbase))
         if reset:
             self.build_xv6()
             self.reset_fs()
-        q = ["make", "qemu"]
+        q = ["make", "qemu", f"CPUS={config.cpus}"]
+        self.launch = q
         self.control_dir = tempfile.TemporaryDirectory(prefix="xv6-qmp-") if control else None
         self.control_socket = None
         self.control_stream = None
@@ -46,10 +59,11 @@ class QEMU(object):
         try:
             if exc[0] is not None:
                 self.read()
-                self.save_output()
                 print(self.output)
         finally:
             self.stop()
+            self.read()
+            self.save_output()
             self.proc.stdin.close()
             self.proc.stdout.close()
 
@@ -62,15 +76,18 @@ class QEMU(object):
         run(["make", "kernel/kernel"], check=True)
 
     def save_output(self):
-        try:
-            with open("test-xv6.out", "w") as f:
-                f.write(self.output)
-        except OSError as e:
-            print("Provided a bad results path. Error:", e)
-        
+        Path("test-xv6.out").write_text(self.output)
+        self.logbase.with_suffix(".serial.log").write_text(self.output)
+        self.logbase.with_suffix(".json").write_text(json.dumps({
+            "launch": self.launch, "commands": self.commands,
+            "cpus": config.cpus, "commit": git_metadata("rev-parse", "HEAD"),
+            "dirty": git_metadata("status", "--short"),
+        }, indent=2))
+
     def cmd(self, c):
         if isinstance(c, str):
             c = c.encode('utf-8')
+        self.commands.append(c.decode('utf-8', 'replace'))
         self.proc.stdin.write(c)
         self.proc.stdin.flush()
         
@@ -283,20 +300,94 @@ def test_usertests(test=""):
         q.cmd("usertests" + opt + "\n")
         q.monitor('^ALL TESTS PASSED', progress='test', timeout=timeout)
 
+DEDICATED = ("cowtest", "kmemtest", "waitxtest", "cputest", "priotest", "mixstress")
+
+
+def git_metadata(*command):
+    result = run(["git", *command], capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def run_guest(q, command, timeout):
+    start = len(q.output)
+    q.cmd("testrun " + command + "\n")
+    name = command.split()[0]
+    deadline = time.monotonic() + timeout
+    while True:
+        q.read()
+        output = q.output[start:]
+        result = re.search(r"^TEST RESULT " + re.escape(name) + r" (-?\d+)\r?$", output, re.M)
+        if re.search(r"panic:|FAIL|MISMATCH", output):
+            raise RuntimeError(f"{command}: guest failure")
+        if result:
+            if int(result[1]) != 0:
+                raise RuntimeError(f"{command}: exit status {result[1]}")
+            if re.search(r"\$ *$", output[result.end():]):
+                if not re.search(r"^" + re.escape(name) + r": OK\b", output, re.M):
+                    raise RuntimeError(f"{command}: missing success marker")
+                print(f"PASS {command}")
+                return
+        if q.proc.poll() is not None:
+            raise RuntimeError(f"{command}: QEMU exited")
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"{command}: timeout after {timeout}s")
+        time.sleep(0.05)
+
+
 def main():
-    print(args)
-    rex = r'%s' % args.testrex
-    funcs = [(obj,name) for name,obj in inspect.getmembers(sys.modules[__name__]) 
-                     if (inspect.isfunction(obj) and 
-                         name.startswith('test'))]
-    none = True
-    for (f,n) in funcs:
-        if re.search(rex, n):
-            none = False
-            f()
-    if none:
-        test_usertests(test=args.testrex)
+    global config
+    config = args
+    if args.repeat < 1 or args.timeout <= 0:
+        parser.error("repeat and timeout must be positive")
+    directory = Path(args.artifacts)
+    directory.mkdir(parents=True, exist_ok=True)
+    summary = {"cpus": args.cpus, "argv": sys.argv, "commit": git_metadata("rev-parse", "HEAD"),
+               "dirty": git_metadata("status", "--short"), "results": [], "sessions": sessions}
+    destination = directory / (str(time.time_ns()) + "-summary.json")
+    if args.testrex == "dedicated":
+        selected = list(DEDICATED)
+    elif args.testrex in DEDICATED:
+        selected = [args.testrex]
+    else:
+        funcs = {"usertests": test_usertests, "crash": test_crash,
+                 "log": test_log, "forphan": test_forphan, "dorphan": test_dorphan}
+        selected = [name for name in funcs if re.search(args.testrex, "test_" + name)]
+        if args.testrex in funcs:
+            selected = [args.testrex]
+        if not selected:
+            selected = ["usertests:" + args.testrex]
+    try:
+        for iteration in range(1, args.repeat + 1):
+            for name in selected:
+                row = {"test": name, "iteration": iteration, "status": "FAIL"}
+                summary["results"].append(row)
+                started = time.monotonic()
+                print(f"RUN {name} CPU={args.cpus} iteration={iteration}")
+                try:
+                    if name in DEDICATED:
+                        with QEMU(True) as q:
+                            q.wait_shell()
+                            run_guest(q, name, args.timeout)
+                    elif name.startswith("usertests:"):
+                        test_usertests(name.split(":", 1)[1])
+                    else:
+                        funcs[name]()
+                    row["status"] = "PASS"
+                except BaseException as exc:
+                    row["error"] = str(exc)
+                    raise
+                finally:
+                    row["seconds"] = round(time.monotonic() - started, 3)
+    finally:
+        destination.write_text(json.dumps(summary, indent=2))
+        print(f"Summary: {destination}")
+        for row in summary["results"]:
+            print(f"{row['status']} {row['test']} #{row['iteration']} ({row['seconds']}s)")
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    main()
+    try:
+        main()
+    except (RuntimeError, subprocess.CalledProcessError, KeyboardInterrupt) as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        sys.exit(1)

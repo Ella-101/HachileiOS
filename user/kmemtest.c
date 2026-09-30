@@ -84,9 +84,8 @@ main(int argc, char *argv[])
     fprintf(2, "kmemtest: fork failed\n");
     exit(1);
   }
-  wait(&status);
-  if (status != 0) {
-    printf("kmemtest: FAIL allocation check failed in child\n");
+  if (wait(&status) != pid || status != 0) {
+    fprintf(2, "kmemtest: FAIL child status\n");
     exit(1);
   }
 
@@ -117,7 +116,10 @@ main(int argc, char *argv[])
         fprintf(2, "kmemtest: fork failed\n");
         exit(1);
       }
-      wait(&status);
+      if (wait(&status) != pid || status != 0) {
+        fprintf(2, "kmemtest: FAIL child status\n");
+        exit(1);
+      }
     }
     snap("round end");
     printf("kmemtest: round %d: live %ld -> %ld after %d children\n", i + 1,

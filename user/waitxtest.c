@@ -119,11 +119,12 @@ main(int argc, char *argv[])
     printf("waitxtest:   MISMATCH (waitx must match the child's view)\n");
     ok = 0;
   }
-  if ((int)pu < want) {
-    printf("waitxtest:   MISMATCH (expected at least %d user ticks)\n", want);
+  if (status != 0 || pu + TOLERANCE < (uint64)want) {
+    printf("waitxtest:   MISMATCH (expected approximately %d user ticks)\n",
+           want);
     ok = 0;
   }
 
   printf("waitxtest: %s\n", ok ? "OK" : "FAILED");
-  exit(0);
+  exit(ok ? 0 : 1);
 }
