@@ -8,7 +8,7 @@
 # ./test-xv6.py crash  (runs the crash tests)
 # ./test-xv6.py log (runs the log crash test)
 
-import argparse, os, inspect, re, signal, subprocess, sys, time
+import argparse, os, inspect, json, re, signal, socket, struct, subprocess, sys, tempfile, time
 from subprocess import run
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -16,44 +16,57 @@ sys.stdout.reconfigure(line_buffering=True)
 parser = argparse.ArgumentParser()
 parser.add_argument('testrex', help="test name or regular expression")
 parser.add_argument("-q", action='store_true', help="usertests quick")
-args = parser.parse_args()
 
 class QEMU(object):
 
-    def __init__(self, reset=False):
+    def __init__(self, reset=False, control=False):
         if reset:
             self.build_xv6()
             self.reset_fs()
         q = ["make", "qemu"]
+        self.control_dir = tempfile.TemporaryDirectory(prefix="xv6-qmp-") if control else None
+        self.control_socket = None
+        self.control_stream = None
+        if control:
+            self.control_path = os.path.join(self.control_dir.name, "qmp")
+            q.append(f"QEMUEXTRA=-qmp unix:{self.control_path},server=on,wait=off")
         self.proc = subprocess.Popen(q, stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE,
-                                      stderr=subprocess.STDOUT)
+                                      stderr=subprocess.STDOUT,
+                                      start_new_session=True)
         os.set_blocking(self.proc.stdout.fileno(), False)
         self.output = ""
         self.outbytes = bytearray()
         self.reported = 0
-        time.sleep(1)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if exc[0] is not None:
+                self.read()
+                self.save_output()
+                print(self.output)
+        finally:
+            self.stop()
+            self.proc.stdin.close()
+            self.proc.stdout.close()
 
     def reset_fs(self):
-        try:
-            run(["rm", "-f", "fs.img"], check=True)
-            run(["make", "fs.img"], check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"Command failed with exit code {e.returncode}")
+        if os.path.exists("fs.img"):
+            os.unlink("fs.img")
+        run(["make", "fs.img"], check=True)
 
     def build_xv6(self):
-        try:
-            run(["make", "kernel/kernel"], check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"Command failed with exit code {e.returncode}")
+        run(["make", "kernel/kernel"], check=True)
 
     def save_output(self):
-      try:
-        with open("test-xv6.out", "w") as f:
-            f.write(self.output)
-            f.close()
-      except OSError as e:
-        print("Provided a bad results path. Error:", e)     
+        try:
+            with open("test-xv6.out", "w") as f:
+                f.write(self.output)
+        except OSError as e:
+            print("Provided a bad results path. Error:", e)
         
     def cmd(self, c):
         if isinstance(c, str):
@@ -62,16 +75,78 @@ class QEMU(object):
         self.proc.stdin.flush()
         
     def crash(self):
-        ps = run(['ps', '-opid', '--no-headers', '--ppid', str(self.proc.pid)], stdout=subprocess.PIPE, encoding='utf8')
-        kids = [int(line) for line in ps.stdout.splitlines()]
-        if len(kids) == 0:
-            print("no qemu")
-            sys.exit(1)
-        print("kill", kids[0])
-        os.kill(kids[0], signal.SIGKILL)
+        if self.proc.poll() is not None:
+            self.error("QEMU exited before crash")
+        self.stop(signal.SIGKILL)
 
-    def stop(self):
-        self.proc.terminate()
+    def stop(self, sig=signal.SIGTERM):
+        # make and QEMU share a private process group. Kill both, including
+        # when make has already exited, and wait before reusing the image.
+        try:
+            os.killpg(self.proc.pid, sig)
+        except ProcessLookupError:
+            pass
+        try:
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+            self.proc.wait()
+        if self.control_stream:
+            self.control_stream.close()
+            self.control_stream = None
+        if self.control_socket:
+            self.control_socket.close()
+            self.control_socket = None
+        if self.control_dir:
+            self.control_dir.cleanup()
+            self.control_dir = None
+
+    def qmp(self, command):
+        if self.control_socket is None:
+            self.control_socket = socket.socket(socket.AF_UNIX)
+            self.control_socket.settimeout(5)
+            self.control_socket.connect(self.control_path)
+            self.control_stream = self.control_socket.makefile("rb")
+            greeting = json.loads(self.control_stream.readline())
+            if "QMP" not in greeting:
+                self.error("Invalid QMP greeting")
+            self.qmp("qmp_capabilities")
+        self.control_socket.sendall(json.dumps({"execute": command}).encode() + b"\n")
+        while True:
+            line = self.control_stream.readline()
+            if not line:
+                self.error("QMP disconnected")
+            reply = json.loads(line)
+            if "error" in reply:
+                self.error(f"QMP {command}: {reply['error']}")
+            if "return" in reply:
+                return reply["return"]
+            # STOP/RESUME events may arrive before the command response.
+
+    def crash_in_log(self, timeout=30):
+        # kernel/fs.h: little-endian superblock in block 1, logstart is
+        # its sixth uint. Inspect the header only with guest CPUs stopped,
+        # so they cannot clear the committed transaction before the kill.
+        with open("fs.img", "rb", buffering=0) as disk:
+            disk.seek(1024)
+            magic, _, _, _, nlog, logstart, _, _ = struct.unpack("<8I", disk.read(32))
+            if magic != 0x10203040:
+                self.error("Invalid filesystem superblock")
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                self.qmp("stop")
+                disk.seek(logstart * 1024)
+                pending, = struct.unpack("<I", disk.read(4))
+                if 0 < pending < nlog:
+                    print(f"Crash with {pending} committed log blocks")
+                    self.crash()
+                    return
+                self.qmp("cont")
+                time.sleep(0.01)
+                self.read()
+                if re.search(r"panic:|failed|out of blocks", self.output):
+                    self.error("logstress failed before crash")
+            self.error("No committed log transaction observed")
 
     def read(self):
         while True:
@@ -94,20 +169,11 @@ class QEMU(object):
     # could still be sitting in the UART when the harness killed qemu,
     # leaving no pending log and no files to recover.
     def wait_shell(self, timeout=30):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            time.sleep(0.5)
-            self.read()
-            for line in self.lines():
-                if re.match(r'\$ *$', line):
-                    return
-        return
+        self.monitor(r'\$ *$', timeout=timeout)
 
     def error(self, *regexps):
         print("FAIL: match failed", regexps)
-        self.save_output()
-        self.stop()
-        sys.exit(1)
+        raise RuntimeError(f"match failed: {regexps}")
 
     def match(self, *regexps, exit=True):
         found = False
@@ -132,78 +198,60 @@ class QEMU(object):
         self.reported = end
 
     def monitor(self, *regexps, progress="", timeout, fail=True):
-        deadline = time.time() + timeout
+        deadline = time.monotonic() + timeout
         while True:
-            time.sleep(1)
-            timeleft = deadline - time.time()
-            if timeleft < 0:
-                if fail:
-                    self.error(*regexps)
-                return False
             self.read()
             if progress:
                 self.progress(progress)
             if self.match(*regexps, exit=False):
                 return True
+            if self.proc.poll() is not None:
+                self.error("QEMU exited", *regexps)
+            if time.monotonic() >= deadline:
+                if fail:
+                    self.error(*regexps)
+                return False
+            time.sleep(0.1)
 
 def crash_log():
-    q = QEMU(True)
-    q.wait_shell()
-    q.cmd("logstress f0 f1 f2 f3 f4 f5\n")
-    # logstress forks six children that each create one file; give them
-    # long enough to all get going before pulling the plug.  If the crash
-    # lands too early the recovered image may be missing f5, which the
-    # caller now treats as a retryable failure rather than a hard error.
-    time.sleep(5)
-    q.crash()
-    q.stop()
+    with QEMU(True, control=True) as q:
+        q.wait_shell()
+        q.cmd("logstress f0 f1 f2 f3 f4 f5\n")
+        q.monitor('^logstress ready$', timeout=30)
+        q.crash_in_log()
 
 def recover_log():
-    q = QEMU()
-    q.wait_shell()
-    q.read()
-    ok = q.match('^recovering', exit=False)
-    if ok:
+    with QEMU() as q:
+        q.wait_shell()
+        q.match('^recovering')
         q.cmd("ls\n")
-        # A missing f5 means this attempt crashed before logstress created
-        # all its files; report it so test_log can retry instead of
-        # aborting the whole run.
-        ok = q.monitor('f5', timeout=10, fail=False)
-    q.stop()
-    return ok
+        for i in range(6):
+            q.monitor(rf'^f{i}\s+2\s+\d+\s+\d+\s*$', timeout=10)
 
 def forphan():
-    q = QEMU(True)
-    q.wait_shell()
-    q.cmd("forphan\n")
-    q.monitor('wait', timeout=30)
-    q.crash()
-    q.stop()
+    with QEMU(True) as q:
+        q.wait_shell()
+        q.cmd("forphan\n")
+        q.monitor('wait', timeout=30)
+        q.crash()
 
 def dorphan():
-    q = QEMU(True)
-    q.wait_shell()
-    q.cmd("dorphan\n")
-    q.monitor('wait', timeout=30)
-    q.crash()
-    q.stop()
+    with QEMU(True) as q:
+        q.wait_shell()
+        q.cmd("dorphan\n")
+        q.monitor('wait', timeout=30)
+        q.crash()
 
 def recover_orphan():
-    q = QEMU()
-    q.monitor('^ireclaim', timeout=30)
-    q.stop()
+    with QEMU() as q:
+        q.monitor('^ireclaim', timeout=30)
+        q.wait_shell()
 
 def test_log():
     print("Test recovery of log")
-    for i in range(20):
-        crash_log()
-        ok = recover_log()
-        if ok:
-            print("OK")
-            return
-        print("log attempt ", i+1)
-    print("FAIL")
-    sys.exit(1)
+    crash_log()
+    recover_log()
+    print("OK")
     
 def test_forphan():
     print("Test recovery of an orphaned file")
@@ -230,11 +278,10 @@ def test_usertests(test=""):
         timeout = 300
     elif test != "":
         opt += " " + test
-    q = QEMU(True)
-    q.wait_shell()
-    q.cmd("usertests" + opt + "\n")
-    q.monitor('^ALL TESTS PASSED', progress='test', timeout=timeout)
-    q.stop()
+    with QEMU(True) as q:
+        q.wait_shell()
+        q.cmd("usertests" + opt + "\n")
+        q.monitor('^ALL TESTS PASSED', progress='test', timeout=timeout)
 
 def main():
     print(args)
@@ -250,4 +297,6 @@ def main():
     if none:
         test_usertests(test=args.testrex)
 
-main()
+if __name__ == "__main__":
+    args = parser.parse_args()
+    main()
