@@ -1,0 +1,75 @@
+# Everything the agent talks to, behind one OpenAI-compatible endpoint.
+#
+# The agent never sees a provider.  It sees 127.0.0.1:4000/v1/chat/completions
+# and nothing else, which is what makes "supports several model APIs" a config
+# change instead of a code change -- and what makes swapping the primary
+# provider invisible to the conversation.
+#
+# Since this image carries no local model, this file is the *only* way to a
+# model.  Two entries are therefore the minimum for a usable system, and the
+# routing section is not an optimisation: it is what stands between the user
+# and a dead assistant.
+
+gateway:
+  listen: 127.0.0.1:4000
+  # Never 0.0.0.0. The endpoint holds provider keys in memory while it runs.
+  default_model: null            # set by the first-run wizard
+  request_timeout_s: 60
+  connect_timeout_s: 10
+  # A stream that stalls for longer than this is abandoned so the caller can say so
+  # instead of spinning forever (checklist C8).
+  stream_idle_timeout_s: 30
+  max_retries: 3
+  retry_on: [429, 500, 502, 503, 504]
+  retry_backoff: exponential
+  log_prompts: false             # prompt text is user data; off unless asked
+
+providers:
+  - name: primary
+    # Any vendor exposing /v1/chat/completions works here.  `type` exists so an
+    # adapter can be added later without touching the config schema.
+    type: openai_compatible
+    base_url: https://api.example-a.com/v1
+    # A reference, not the key.  The key itself lives in the encrypted store
+    # and is injected into the process by systemd (LoadCredential=), never into
+    # the environment or the command line, so it cannot be read out of
+    # /proc/<pid>/environ (checklist E2).
+    key_ref: "secret:providers/primary"
+    models: [model-a-large, model-a-mini]
+    priority: 10
+    # After a failure, stop sending here for this long before trying again.
+    cooldown_s: 60
+    max_output_tokens: 8192
+
+  - name: backup
+    type: openai_compatible
+    base_url: https://api.example-b.com/v1
+    key_ref: "secret:providers/backup"
+    models: [model-b]
+    priority: 20
+    cooldown_s: 120
+    max_output_tokens: 8192
+
+routing:
+  # failover: always use the best healthy provider; move on when it fails.
+  # round_robin: spread load, and spread rate-limit pain.
+  mode: failover
+  # What the caller sees when every provider is down or cooling.  A 503 with a
+  # body naming the reason, so the agent can tell the user something true
+  # rather than showing a spinner (checklist C6, C8).
+  on_all_failed:
+    status: 503
+    message: "no model provider is currently reachable"
+  health:
+    probe_path: /v1/models
+    interval_s: 60
+    # Two consecutive failures mark a provider down; one success clears it.
+    failures_to_mark_down: 2
+
+telemetry:
+  # Token counts and estimated cost per call, per session and per model.  With
+  # no local model there is no free path, so the user is always spending money
+  # and this is the only place that is visible (checklist C7).
+  record_usage: true
+  price_table: prices.yaml       # user-editable; unknown models are counted
+                                 # in tokens and marked "cost unknown"

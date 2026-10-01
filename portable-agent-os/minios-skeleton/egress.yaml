@@ -1,0 +1,61 @@
+# What is allowed to leave this machine.
+#
+# With no local model, every conversation and every file the tools read is sent
+# to a provider.  There is no way to make that not happen -- so the honest
+# features are the ones that let the user decide what goes, and that tell them
+# when it goes.  This file is the first; the pre-send notice is the second.
+#
+# The default is deliberately NOT "allow everything": a system that ships with
+# unrestricted egress has made the user's decision for them.
+
+mode: denylist          # denylist | allowlist | off
+                        #   denylist  -- send everything except what is listed
+                        #   allowlist -- send nothing except what is listed
+                        #   off       -- refuse all egress; files and shell only
+
+# Paths whose contents must never be included in a prompt, whatever the tool
+# asks for.  Matched after resolving symlinks, so `ln -s ~/.ssh /work/x` does
+# not get around this.
+deny_paths:
+  - "/etc/minios/secrets/**"
+  - "**/.ssh/**"
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/id_rsa"
+  - "**/id_ed25519"
+  - "**/.netrc"
+  - "**/.env"
+  - "**/.git/config"      # remote URLs often carry a token
+
+# In allowlist mode, this is the whole of what may be sent.
+allow_paths: []
+#  - "/home/*/work/**"
+
+# Applied to any text on its way out, after the path rules have passed.
+redact:
+  - name: payment-card
+    pattern: '\b(?:\d[ -]?){13,19}\b'
+    replace: "[redacted:card]"
+  - name: national-id
+    pattern: '\b\d{17}[\dXx]\b'
+    replace: "[redacted:id]"
+  - name: private-key-block
+    pattern: '-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----'
+    replace: "[redacted:private-key]"
+
+# HTTP hosts the http.request tool may reach.  Empty means none: the tool still
+# exists, it just always refuses, and the refusal is a structured error the
+# model can read rather than an exception the user cannot see.
+egress_hosts: []
+#  - "api.example.com"
+
+# Before anything identified above leaves the machine, say so.  Not a prompt
+# that blocks -- a notification that carries the list, so the user learns what
+# their agent is doing instead of having to trust it.
+notice:
+  enabled: true
+  # Also show the notice when a large body is about to be sent, even if it
+  # matched no deny rule: volume is its own risk.
+  on_large_payload_bytes: 131072
+  # Per-session off switch, off by default so it cannot be disabled by accident.
+  allow_session_override: false

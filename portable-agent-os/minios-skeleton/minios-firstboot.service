@@ -1,0 +1,20 @@
+[Unit]
+Description=Seed the writable layer with the layout miniOS expects
+Documentation=man:firstboot(8)
+# Must run before anything reads a config file or writes state, and after the
+# filesystems (including the overlay that makes /etc writable) are in place.
+DefaultDependencies=no
+After=systemd-remount-fs.service systemd-machine-id-commit.service
+Before=hwprofild.service network-pre.target sysinit.target
+Wants=systemd-machine-id-commit.service
+ConditionPathExists=!/run/minios/firstboot.json
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/minios/firstboot.py --quiet
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=sysinit.target

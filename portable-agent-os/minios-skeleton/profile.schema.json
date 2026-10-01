@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://minios.local/schemas/profile.json",
+  "title": "miniOS hardware profile",
+  "description": "What the machine we booted on actually is. Consumer: every subsystem that would otherwise assume. Generator: hwprofil.py. A partial profile is valid: unknown values are null, never absent-by-accident.",
+  "type": "object",
+  "required": ["schema", "generated_at", "machine_id", "cpu", "memory", "firmware", "platform", "disks", "net", "pci"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": 1,
+      "description": "Bump only on a breaking change; consumers reject what they do not understand."
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "machine_id": {
+      "type": "string",
+      "description": "systemd machine id. Must be generated per host on first boot, so the image must ship an empty /etc/machine-id; a baked-in id would make every host look like the same machine.",
+      "minLength": 1
+    },
+    "boot_id": {
+      "type": ["string", "null"],
+      "description": "Kernel boot id, so a profile can be tied to one boot rather than one host."
+    },
+    "hostname": {
+      "type": ["string", "null"]
+    },
+    "kernel": {
+      "type": ["string", "null"]
+    },
+    "cpu": {
+      "type": "object",
+      "required": ["arch", "model", "cores", "threads", "features"],
+      "properties": {
+        "arch": { "type": ["string", "null"] },
+        "model": { "type": ["string", "null"] },
+        "vendor": { "type": ["string", "null"] },
+        "cores": { "type": ["integer", "null"], "minimum": 1 },
+        "threads": { "type": ["integer", "null"], "minimum": 1 },
+        "features": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Intersection of the CPU's capabilities with a fixed short list, not the full flag set: consumers ask 'is avx2 available', never 'list everything'."
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "required": ["total_kb", "available_kb"],
+      "properties": {
+        "total_kb": { "type": ["integer", "null"] },
+        "available_kb": { "type": ["integer", "null"] },
+        "swap_kb": { "type": ["integer", "null"] }
+      }
+    },
+    "firmware": {
+      "type": "object",
+      "required": ["kind", "secure_boot"],
+      "properties": {
+        "kind": { "enum": ["uefi", "bios"] },
+        "secure_boot": {
+          "type": ["boolean", "null"],
+          "description": "null means we could not read the EFI variable. Never guess: this value decides whether we tell the user their machine can boot us unattended."
+        }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "required": ["model", "virtualized", "hypervisor"],
+      "properties": {
+        "model": { "type": ["string", "null"] },
+        "virtualized": { "type": "boolean" },
+        "hypervisor": {
+          "enum": ["kvm", "qemu", "vmware", "hyperv", "vbox", "xen", null],
+          "description": "Named only when recognised from DMI. An unrecognised hypervisor stays null rather than being guessed."
+        }
+      }
+    },
+    "disks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "size_bytes", "removable"],
+        "properties": {
+          "name": { "type": "string" },
+          "size_bytes": { "type": ["integer", "null"] },
+          "removable": { "type": "boolean" },
+          "rotational": { "type": ["boolean", "null"] },
+          "model": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "net": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "kind", "mac", "driver"],
+        "properties": {
+          "name": { "type": "string" },
+          "kind": { "enum": ["ethernet", "wifi", "virtio", "other"] },
+          "mac": { "type": ["string", "null"] },
+          "driver": {
+            "type": ["string", "null"],
+            "description": "null on an interface means the kernel has no driver for it, which is the single most useful thing this file can tell a user."
+          },
+          "operstate": { "type": ["string", "null"] },
+          "speed_mbps": { "type": ["integer", "null"] }
+        }
+      }
+    },
+    "pci": {
+      "type": "object",
+      "required": ["devices_total", "undriven", "gpus"],
+      "properties": {
+        "devices_total": { "type": "integer" },
+        "undriven": {
+          "type": "array",
+          "description": "Devices with no driver bound. This is the support-matrix input: what could not be made to work on this machine.",
+          "items": {
+            "type": "object",
+            "required": ["slot", "vendor_id", "device_id", "class"],
+            "properties": {
+              "slot": { "type": "string" },
+              "vendor_id": { "type": ["string", "null"] },
+              "device_id": { "type": ["string", "null"] },
+              "class": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "gpus": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["slot", "vendor_id", "device_id", "driver"],
+            "properties": {
+              "slot": { "type": "string" },
+              "vendor_id": { "type": ["string", "null"] },
+              "device_id": { "type": ["string", "null"] },
+              "driver": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}

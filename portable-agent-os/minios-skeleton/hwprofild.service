@@ -1,0 +1,24 @@
+[Unit]
+Description=Describe the hardware we booted on
+Documentation=man:hwprofil(8)
+# The profile names the machine, so it must not run before machine-id exists.
+# systemd generates it on first boot when the image ships an empty
+# /etc/machine-id, which is what makes a portable image see each host as new
+# hardware instead of as one machine that keeps changing.
+After=systemd-remount-fs.service systemd-machine-id-commit.service
+Before=network-pre.target sysinit.target
+Wants=systemd-machine-id-commit.service
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/minios/hwprofil.py --boot --quiet
+# The result is meant to be read by the session UI, so make it loud in the
+# journal even though the command itself is quiet on success.
+ExecStartPost=/usr/bin/logger -t hwprofil "hardware profile written for %m"
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=sysinit.target
