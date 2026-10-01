@@ -52,12 +52,11 @@ static struct entry cmds[] = {
    "snapshot the process table",
    "Columns: pid ppid state vsz rss usr sys prio name; vsz/rss in KB.", 1},
   {"processes", "top", "[refreshes]",
-   "refresh the process table periodically",
+   "refresh the process table until interrupted",
    // Adjacent string literals concatenate, so this is still one
    // field even though it is written on two lines.
-   "Also shows dcpu/busy% since the last refresh; defaults to 10 "
-   "refreshes and exits, because xv6 has no signals so it cannot "
-   "run forever.", 1},
+   "Also shows dcpu/busy% since the last refresh.  Runs continuously "
+   "without arguments; top n exits after n refreshes.", 1},
   {"processes", "kill", "pid",
    "ask a process to exit",
    "Only sets a flag that the target checks at its next syscall.", 0},
@@ -98,6 +97,9 @@ static struct entry cmds[] = {
    "exercise concurrent fork, COW, pipes and files", 0, 1},
   {"tests", "testrun", "program [args...]",
    "run a test and print its exit status for the host harness", 0, 1},
+  {"tests", "sigtest", "",
+   "check signal masking, handler return, process groups and stop/continue",
+   "Run with `testrun sigtest` for an exit status.", 1},
   {"tests", "usertests", "[-q|-c|-C|testname]",
    "the full regression suite",
    "-q runs the quick set; a bare name runs just that test.", 0},

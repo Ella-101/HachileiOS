@@ -36,6 +36,24 @@ int waitx(int *status, uint64 *utime, uint64 *ktime);
 int fsinfo(struct fsstat *st);
 int sysinfo(struct sysinfo *info);
 int setprio(int pid, int prio);
+#define SIGTERM 1
+#define SIGINT 2
+#define SIGKILL 3
+#define SIGSTOP 4
+#define SIGTSTP 5
+#define SIGCONT 6
+#define SIG_DFL ((void (*)(int))-1)
+#define SIG_IGN ((void (*)(int))-2)
+int signal(int pid, int sig);
+int killpg(int pgid, int sig);
+int sigaction(int sig, void (*handler)(int));
+int sigmask(int mask);
+int sigreturn(void);
+int setpgid(int pid, int pgid);
+int getpgid(void);
+int tcsetpgrp(int pgid);
+int waitpg(int pgid, int *status);
+int jobstate(int pgid);
 
 // ulib.c
 int stat(const char *, struct stat *);

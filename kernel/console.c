@@ -94,10 +94,14 @@ consoleread(int user_dst, uint64 dst, int n)
   target = n;
   acquire(&cons.lock);
   while (n > 0) {
+    if (killed(myproc()) || signal_pending(myproc())) {
+      release(&cons.lock);
+      return -1;
+    }
     // wait until interrupt handler has put some
     // input into cons.buffer.
     while (cons.r == cons.w) {
-      if (killed(myproc())) {
+      if (killed(myproc()) || signal_pending(myproc())) {
         release(&cons.lock);
         return -1;
       }
@@ -149,6 +153,15 @@ consoleintr(int c)
   acquire(&cons.lock);
 
   switch (c) {
+  case C('C'):
+    consputc('^'); consputc('C'); consputc('\n');
+    cons.r = cons.w = cons.e;
+    tty_interrupt();
+    break;
+  case C('Z'):
+    consputc('^'); consputc('Z'); consputc('\n');
+    tty_signal(5);
+    break;
   case C('P'): // Print process list.
     procdump();
     break;

@@ -17,6 +17,7 @@ static char *states[] = {
     [PSTATE_SLEEPING] = "sleep",
     [PSTATE_RUNNABLE] = "runble",
     [PSTATE_RUNNING]  = "run",
+    [PSTATE_STOPPED]  = "stopped",
     [PSTATE_ZOMBIE]   = "zombie",
   // clang-format on
 };

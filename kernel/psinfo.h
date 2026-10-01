@@ -26,7 +26,8 @@
 #define PSTATE_SLEEPING 2
 #define PSTATE_RUNNABLE 3
 #define PSTATE_RUNNING  4
-#define PSTATE_ZOMBIE   5
+#define PSTATE_STOPPED  5
+#define PSTATE_ZOMBIE   6
 
 struct psinfo {
   int pid;               // process id

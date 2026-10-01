@@ -1,9 +1,8 @@
 // top: periodically print the process table plus a memory/uptime
 // summary and per-process CPU time.
 //
-// xv6 has no signals, so a user program cannot be interrupted from the
-// shell; instead of looping forever, top refreshes a bounded number of
-// times (default 10, `top [n]` to change) and exits.
+// Without an argument top runs until a signal ends it.  `top [n]` gives
+// a bounded run when a finite snapshot is more useful.
 //
 // CPU time is in timer ticks (10 Hz, so 1 tick = 100 ms).  Cumulative
 // usr/sys are not very interesting on their own, so we also keep the
@@ -31,6 +30,7 @@ static char *states[] = {
     [PSTATE_SLEEPING] = "sleep",
     [PSTATE_RUNNABLE] = "runble",
     [PSTATE_RUNNING]  = "run",
+    [PSTATE_STOPPED]  = "stopped",
     [PSTATE_ZOMBIE]   = "zombie",
   // clang-format on
 };
@@ -66,18 +66,18 @@ findprev(int pid, uint64 u, uint64 k, struct psinfo *old)
 int
 main(int argc, char *argv[])
 {
-  int iters = 10, it, i, n;
+  int iters = 0, it, i, n;
   uint up, elapsed;
 
   if (argc > 1)
     iters = atoi(argv[1]);
-  if (iters < 1)
+  if (argc > 1 && iters < 1)
     iters = 1;
 
   prev_n = 0;
   prev_up = 0;
 
-  for (it = 0; it < iters; it++) {
+  for (it = 0; iters == 0 || it < iters; it++) {
     n = psinfo(procs, NPROC);
     if (n < 0) {
       fprintf(2, "top: psinfo failed\n");
@@ -89,8 +89,12 @@ main(int argc, char *argv[])
     // ANSI clear screen + cursor home, so each refresh overwrites the
     // previous one.
     printf("\033[2J\033[H");
-    printf("miniOS top   refresh %d/%d   uptime %d ticks   free %ld bytes\n",
-           it + 1, iters, up, freemem());
+    if (iters)
+      printf("miniOS top   refresh %d/%d   uptime %d ticks   free %ld bytes\n",
+             it + 1, iters, up, freemem());
+    else
+      printf("miniOS top   refresh %d   uptime %d ticks   free %ld bytes\n",
+             it + 1, up, freemem());
     printf("pid  ppid state  vsz  rss  usr sys  dcpu  busy%%  name\n");
     for (i = 0; i < n; i++) {
       struct psinfo old;

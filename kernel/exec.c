@@ -135,6 +135,10 @@ kexec(char *path, char **argv)
   p->sz = sz;
   p->trapframe->epc = elf.entry; // initial program counter = ulib.c:start()
   p->trapframe->sp = sp;         // initial stack pointer
+  for (i = 1; i <= NSIG; i++)
+    if (p->sighandlers[i] != (uint64)-1)
+      p->sighandlers[i] = 0;
+  p->sigframe_active = 0;
   proc_freepagetable(oldpagetable, oldsz);
 
   return argc; // this ends up in a0, the first argument to main(argc, argv)

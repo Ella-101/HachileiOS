@@ -76,7 +76,8 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
-enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, STOPPED, ZOMBIE };
+#define NSIG 6
 
 // Per-process state
 struct proc {
@@ -90,6 +91,13 @@ struct proc {
   int pid;              // Process ID
   int prio;             // scheduling priority: smaller is more urgent
   int cur_prio;         // priority the scheduler compares; decays while waiting
+  int pgid;
+  uint pending;
+  uint sigmask;
+  uint64 sighandlers[NSIG + 1];
+  struct trapframe sigframe;
+  uint sigframe_mask;
+  int sigframe_active;
 
   // Exit-time CPU accounting, to be returned to the parent's waitx().
   // Same convention as xstate: written under p->lock in kexit() before

@@ -164,6 +164,7 @@ UPROGS=\
 	$U/_cowtest\
 	$U/_testrun\
 	$U/_mixstress\
+	$U/_sigtest\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

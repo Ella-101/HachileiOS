@@ -54,6 +54,8 @@ extern char trampoline[]; // trampoline.S
 // memory model when using p->parent.
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
+static struct spinlock tty_lock;
+static int tty_pgid;
 
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
@@ -80,6 +82,7 @@ procinit(void)
 
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
+  initlock(&tty_lock, "tty");
   for (p = proc; p < &proc[NPROC]; p++) {
     initlock(&p->lock, "proc");
     p->state = UNUSED;
@@ -184,6 +187,11 @@ found:
   // the previous process priority.
   p->prio = PRIO_DEFAULT;
   p->cur_prio = PRIO_DEFAULT;
+  p->pgid = p->pid;
+  p->pending = 0;
+  p->sigmask = 0;
+  memset(p->sighandlers, 0, sizeof(p->sighandlers));
+  p->sigframe_active = 0;
 
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
@@ -228,6 +236,9 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->pending = 0;
+  p->sigmask = 0;
+  p->pgid = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -334,6 +345,12 @@ kfork(void)
     return -1;
   }
   np->sz = p->sz;
+  np->pgid = p->pgid;
+  np->sigmask = p->sigmask;
+  memmove(np->sighandlers, p->sighandlers, sizeof(np->sighandlers));
+  np->sigframe = p->sigframe;
+  np->sigframe_mask = p->sigframe_mask;
+  np->sigframe_active = p->sigframe_active;
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -490,7 +507,7 @@ kwait(uint64 addr, uint64 uaddr, uint64 kaddr)
     }
 
     // No point waiting if we don't have any children.
-    if (!havekids || killed(p)) {
+    if (!havekids || killed(p) || signal_pending(p)) {
       release(&wait_lock);
       return -1;
     }
@@ -712,8 +729,9 @@ kkill(int pid)
     acquire(&p->lock);
     if (p->pid == pid) {
       p->killed = 1;
-      if (p->state == SLEEPING) {
-        // Wake process from sleep().
+      if (p->state == SLEEPING || p->state == STOPPED) {
+        // Wake a sleeping or stopped process.
+        p->chan = 0;
         p->state = RUNNABLE;
       }
       release(&p->lock);
@@ -722,6 +740,276 @@ kkill(int pid)
     release(&p->lock);
   }
   return -1;
+}
+
+int
+ksignal(int pid, int sig)
+{
+  struct proc *p;
+  if (sig < 1 || sig > NSIG)
+    return -1;
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->pid == pid && p->state != UNUSED && p->state != ZOMBIE) {
+      p->pending |= 1U << sig;
+      if (p->state == STOPPED && sig != 4)
+        p->state = RUNNABLE;
+      else if (p->state == SLEEPING) {
+        p->chan = 0;
+        p->state = RUNNABLE;
+      }
+      release(&p->lock);
+      return 0;
+    }
+    release(&p->lock);
+  }
+  return -1;
+}
+
+int
+ksignalpg(int pgid, int sig)
+{
+  int found = 0;
+  struct proc *p;
+  if (pgid <= 0 || sig < 1 || sig > NSIG)
+    return -1;
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->pgid == pgid && p->state != UNUSED && p->state != ZOMBIE) {
+      p->pending |= 1U << sig;
+      if (p->state == STOPPED && sig != 4)
+        p->state = RUNNABLE;
+      else if (p->state == SLEEPING) {
+        p->chan = 0;
+        p->state = RUNNABLE;
+      }
+      found = 1;
+    }
+    release(&p->lock);
+  }
+  return found ? 0 : -1;
+}
+
+int
+ksetpgid(int pid, int pgid)
+{
+  struct proc *p;
+  if (pgid <= 0)
+    return -1;
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->pid == pid && p->state != UNUSED && p->state != ZOMBIE) {
+      p->pgid = pgid;
+      release(&p->lock);
+      return 0;
+    }
+    release(&p->lock);
+  }
+  return -1;
+}
+
+int
+kgetpgid(void)
+{
+  return myproc()->pgid;
+}
+
+int
+kjobstate(int pgid)
+{
+  int exists = 0, running = 0;
+  struct proc *p;
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->pgid == pgid && p->state != UNUSED && p->state != ZOMBIE) {
+      exists = 1;
+      if (p->state != STOPPED)
+        running = 1;
+    }
+    release(&p->lock);
+  }
+  return !exists ? 0 : running ? 1 : 2;
+}
+
+int
+kwaitpg(int pgid, uint64 addr)
+{
+  struct proc *pp;
+  struct proc *p = myproc();
+  int havekids, pid, status;
+  acquire(&wait_lock);
+  for (;;) {
+    havekids = 0;
+    for (pp = proc; pp < &proc[NPROC]; pp++) {
+      if (pp->parent != p)
+        continue;
+      acquire(&pp->lock);
+      if (pp->pgid == pgid) {
+        havekids = 1;
+        if (pp->state == STOPPED) {
+          pid = pp->pid;
+          status = -2;
+          if (addr && copyout(p->pagetable, p->sz, addr,
+                              (char *)&status, sizeof(status)) < 0) {
+            release(&pp->lock); release(&wait_lock); return -1;
+          }
+          release(&pp->lock); release(&wait_lock); return pid;
+        }
+        if (pp->state == ZOMBIE) {
+          pid = pp->pid;
+          if (addr && copyout(p->pagetable, p->sz, addr,
+                              (char *)&pp->xstate, sizeof(pp->xstate)) < 0) {
+            release(&pp->lock); release(&wait_lock); return -1;
+          }
+          pp->parent = 0; freeproc(pp); release(&pp->lock);
+          release(&wait_lock); return pid;
+        }
+      }
+      release(&pp->lock);
+    }
+    if (!havekids || killed(p) || signal_pending(p)) {
+      release(&wait_lock); return -1;
+    }
+    sleep_prepare(p);
+    release(&wait_lock);
+    sleep();
+    acquire(&wait_lock);
+  }
+}
+
+void
+tty_setpgid(int pgid)
+{
+  acquire(&tty_lock);
+  tty_pgid = pgid;
+  release(&tty_lock);
+}
+
+void
+tty_interrupt(void)
+{
+  int pgid;
+  acquire(&tty_lock);
+  pgid = tty_pgid;
+  release(&tty_lock);
+  if (pgid > 0)
+    ksignalpg(pgid, 2);
+}
+
+int
+tty_signal(int sig)
+{
+  int pgid;
+  acquire(&tty_lock);
+  pgid = tty_pgid;
+  release(&tty_lock);
+  return pgid > 0 ? ksignalpg(pgid, sig) : -1;
+}
+
+int
+signal_pending(struct proc *p)
+{
+  int yes;
+  acquire(&p->lock);
+  yes = (p->pending & ~p->sigmask) != 0;
+  release(&p->lock);
+  return yes;
+}
+
+void
+signal_deliver(struct proc *p)
+{
+  int sig;
+  uint64 handler;
+  acquire(&p->lock);
+  for (sig = 1; sig <= NSIG; sig++)
+    if ((p->pending & (1U << sig)) &&
+        (sig == 3 || !(p->sigmask & (1U << sig))))
+      break;
+  if (sig > NSIG) {
+    release(&p->lock);
+    return;
+  }
+  p->pending &= ~(1U << sig);
+  handler = p->sighandlers[sig];
+  if (sig == 3 || sig == 4 || handler == 0) {
+    if (sig == 6) {
+      release(&p->lock);
+      return;
+    }
+    if (sig == 4 || sig == 5) {
+      p->state = STOPPED;
+      sched();
+      release(&p->lock);
+      signal_deliver(p);
+      return;
+    }
+    release(&p->lock);
+    kexit(128 + sig);
+  }
+  if (handler == (uint64)-1) {
+    release(&p->lock);
+    return;
+  }
+  handler--;
+  p->sigframe = *p->trapframe;
+  p->sigframe_mask = p->sigmask;
+  p->sigmask = 0xffffffffU;
+  p->sigmask &= ~((1U << 3) | (1U << 4));
+  p->sigframe_active = 1;
+  p->trapframe->epc = handler;
+  p->trapframe->a0 = sig;
+  release(&p->lock);
+}
+
+int
+ksigaction(int sig, uint64 handler)
+{
+  struct proc *p = myproc();
+  pte_t *pte;
+  if (sig < 1 || sig > NSIG || sig == 3 || sig == 4)
+    return -1;
+  if (handler != (uint64)-1 && handler != (uint64)-2) {
+    pte = walk(p->pagetable, handler, 0);
+    if (handler >= p->sz || pte == 0 || !(*pte & PTE_V) ||
+        !(*pte & PTE_U) || !(*pte & PTE_X))
+      return -1;
+  }
+  acquire(&p->lock);
+  if (handler == (uint64)-1)
+    p->sighandlers[sig] = 0;
+  else if (handler == (uint64)-2)
+    p->sighandlers[sig] = (uint64)-1;
+  else
+    p->sighandlers[sig] = handler + 1;
+  release(&p->lock);
+  return 0;
+}
+
+int
+ksigmask(uint mask)
+{
+  struct proc *p = myproc();
+  acquire(&p->lock);
+  p->sigmask = mask & ~((1U << 3) | (1U << 4) | (1U << 6));
+  release(&p->lock);
+  return 0;
+}
+
+int
+ksigreturn(void)
+{
+  struct proc *p = myproc();
+  acquire(&p->lock);
+  if (!p->sigframe_active) {
+    release(&p->lock);
+    return -1;
+  }
+  *p->trapframe = p->sigframe;
+  p->sigmask = p->sigframe_mask;
+  p->sigframe_active = 0;
+  release(&p->lock);
+  return p->sigframe.a0;
 }
 
 // Set the scheduling priority of process pid.  The caller has already

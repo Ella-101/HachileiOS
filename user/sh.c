@@ -12,6 +12,77 @@
 #define BACK  5
 
 #define MAXARGS 10
+#define MAXJOBS 16
+
+struct job { int pgid; int active; int stopped; };
+static struct job jobs[MAXJOBS];
+
+static int
+hasprefix(char *text, char *prefix)
+{
+  while (*prefix)
+    if (*text++ != *prefix++)
+      return 0;
+  return 1;
+}
+
+static void
+job_add(int pgid, int stopped)
+{
+  int i;
+  for (i = 0; i < MAXJOBS; i++) {
+    if (!jobs[i].active) {
+      jobs[i].pgid = pgid;
+      jobs[i].stopped = stopped;
+      jobs[i].active = 1;
+      return;
+    }
+  }
+  fprintf(2, "sh: job table full\n");
+}
+
+static int
+job_find(int pgid)
+{
+  int i;
+  for (i = 0; i < MAXJOBS; i++)
+    if (jobs[i].active && jobs[i].pgid == pgid)
+      return i;
+  return -1;
+}
+
+static void
+job_refresh(void)
+{
+  int i;
+  for (i = 0; i < MAXJOBS; i++) {
+    if (jobs[i].active && jobstate(jobs[i].pgid) == 0) {
+      waitpg(jobs[i].pgid, 0);
+      jobs[i].active = 0;
+    }
+  }
+}
+
+static void
+job_wait(int pgid)
+{
+  int status, pid = waitpg(pgid, &status);
+  tcsetpgrp(getpgid());
+  if (pid < 0)
+    return;
+  if (status == -2) {
+    int slot = job_find(pgid);
+    if (slot < 0)
+      job_add(pgid, 1);
+    else
+      jobs[slot].stopped = 1;
+    fprintf(2, "[%d] stopped\n", pgid);
+  } else {
+    int slot = job_find(pgid);
+    if (slot >= 0)
+      jobs[slot].active = 0;
+  }
+}
 
 struct cmd {
   int type;
@@ -134,11 +205,22 @@ runcmd(struct cmd *cmd)
 int
 getcmd(char *buf, int nbuf)
 {
+  int i = 0, n;
+  char c;
   write(2, "$ ", 2);
-  memset(buf, 0, nbuf);
-  gets(buf, nbuf);
-  if (buf[0] == 0) // EOF
-    return -1;
+  while (i + 1 < nbuf) {
+    n = read(0, &c, 1);
+    if (n < 0) {
+      write(2, "$ ", 2);
+      continue;
+    }
+    if (n == 0)
+      return -1;
+    buf[i++] = c;
+    if (c == '\n')
+      break;
+  }
+  buf[i] = 0;
   return 0;
 }
 
@@ -147,6 +229,11 @@ main(void)
 {
   static char buf[100];
   int fd;
+
+  setpgid(0, getpid());
+  tcsetpgrp(getpgid());
+  sigaction(SIGINT, SIG_IGN);
+  sigaction(SIGTSTP, SIG_IGN);
 
   // Ensure that three file descriptors are open.
   while ((fd = open("console", O_RDWR)) >= 0) {
@@ -158,6 +245,7 @@ main(void)
 
   // Read and run input commands.
   while (getcmd(buf, sizeof(buf)) >= 0) {
+    job_refresh();
     char *cmd = buf;
     while (*cmd == ' ' || *cmd == '\t')
       cmd++;
@@ -168,10 +256,44 @@ main(void)
       cmd[strlen(cmd) - 1] = 0; // chop \n
       if (chdir(cmd + 3) < 0)
         fprintf(2, "cannot cd %s\n", cmd + 3);
+    } else if (hasprefix(cmd, "jobs") &&
+               (cmd[4] == '\n' || cmd[4] == 0 || cmd[4] == ' ')) {
+      for (int i = 0; i < MAXJOBS; i++)
+        if (jobs[i].active)
+          printf("[%d] %s\n", jobs[i].pgid,
+                 jobstate(jobs[i].pgid) == 2 ? "stopped" : "running");
+    } else if (hasprefix(cmd, "fg ") || hasprefix(cmd, "bg ")) {
+      int foreground = cmd[0] == 'f';
+      int pgid = atoi(cmd + 3), slot = job_find(pgid);
+      if (slot < 0) {
+        fprintf(2, "sh: no such job %d\n", pgid);
+      } else {
+        killpg(pgid, SIGCONT);
+        jobs[slot].stopped = 0;
+        if (foreground) {
+          tcsetpgrp(pgid);
+          job_wait(pgid);
+        }
+      }
     } else {
-      if (fork1() == 0)
-        runcmd(parsecmd(cmd));
-      wait(0);
+      struct cmd *parsed = parsecmd(cmd);
+      int background = parsed && parsed->type == BACK;
+      struct cmd *run = background ? ((struct backcmd *)parsed)->cmd : parsed;
+      int pid = fork1();
+      if (pid == 0) {
+        setpgid(0, getpid());
+        sigaction(SIGINT, SIG_DFL);
+        sigaction(SIGTSTP, SIG_DFL);
+        runcmd(run);
+      }
+      setpgid(pid, pid);
+      if (background) {
+        job_add(pid, 0);
+        printf("[%d] %d\n", pid, pid);
+      } else {
+        tcsetpgrp(pid);
+        job_wait(pid);
+      }
     }
   }
   exit(0);

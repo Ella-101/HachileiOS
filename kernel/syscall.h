@@ -28,3 +28,13 @@
 #define SYS_fsinfo  27
 #define SYS_sysinfo 28
 #define SYS_setprio 29
+#define SYS_sigaction 30
+#define SYS_sigmask 31
+#define SYS_sigreturn 32
+#define SYS_signal 33
+#define SYS_killpg 34
+#define SYS_setpgid 35
+#define SYS_getpgid 36
+#define SYS_tcsetpgrp 37
+#define SYS_waitpg 38
+#define SYS_jobstate 39

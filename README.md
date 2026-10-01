@@ -8,20 +8,19 @@
 
 本项目以 MIT 6.1810 教学操作系统 **xv6-riscv**（`riscv` 分支，基线 HEAD `9e3161a`）为起点，逐步演进为一个 "miniOS"。目标不是做一个"看起来像操作系统"的演示，而是以**可快速追加、可独立验证**的小步前进方式，补全操作系统概念（进程、内存、锁、日志、CPU 统计），并在每一步都保留真实的工程权衡。
 
-### 当前进度（2026-09-30）
+### 当前进度（2026-10-01）
 
-已完成批次 1–8，以及 miniOS 路线图的**阶段一：自动化验证**。本批新增
-`testrun` 退出状态报告器和 `mixstress` 组合压力测试，自动运行 6 个专用
-测试，并配置 Linux 单核/三核 CI、超时、串口日志和 JSON 结果汇总。
+已完成批次 1–8，以及 miniOS 路线图的**阶段一：自动化验证**和**阶段二：信号与终端作业控制**。阶段二新增最小信号接口、进程组、Ctrl-C/Ctrl-Z 前台作业控制、Shell 的 `jobs`/`fg`/`bg`，以及 `sigtest`。
 
-本地验收通过：19 项宿主测试、单核/三核各 10 轮共 120 项专用测试、
-两种配置的完整 `usertests` 和全部崩溃恢复测试。故障注入验证了失败检测、
-超时和 QEMU 进程清理。详细结果及环境限制见
+阶段一验收通过：19 项宿主测试、单核/三核各 10 轮共 120 项专用测试、
+两种配置的完整 `usertests` 和全部崩溃恢复测试。阶段二单核/三核专用集合、
+两种配置的完整 `usertests` 和崩溃恢复也全部通过；`sigtest` 另在单核连续通过
+3 轮。详细阶段一结果及环境限制见
 [阶段一验证记录](docs/stage1-validation.md)。远端构建和测试状态以
 [GitHub Actions](https://github.com/Miusdy/HachileiOS/actions/workflows/test.yml)
 为准，本地通过不代表远端 CI 已通过。
 
-下一阶段是信号与终端作业控制，之后实现身份与权限；这些功能尚未实现。
+下一阶段是身份与权限体系；该阶段尚未实现。
 完整范围见 [miniOS 路线图](docs/minios-roadmap.md)。
 
 ### 设计原则
@@ -58,7 +57,7 @@ make clean         # 清理构建产物
 | `ps` | 列出进程，含用户态/内核态 CPU 时间 |
 | `free` | 物理内存总量 / 已用 / 空闲 |
 | `dmesg` | 回放内核日志环形缓冲区 |
-| `top [n]` | 周期性刷新进程表 + CPU 增量（默认 10 次） |
+| `top [n]` | 持续刷新进程表 + CPU 增量；给出 n 时刷新 n 次后退出 |
 | `neofetch` | 一次性系统概览（含在线 hart 数、磁盘 I/O） |
 | `cputest [ticks]` | CPU 时间统计的自检程序（默认累计 20 tick） |
 | `df` | 文件系统用量（块 / inode） |
@@ -69,8 +68,9 @@ make clean         # 清理构建产物
 | `mixstress` | 并发 fork/wait、管道、COW、文件创建/删除的组合压力测试 |
 | `testrun program [args...]` | 宿主测试使用的退出状态报告器 |
 | `cowtest` | 写时复制 fork 的自检程序（共享代价、写隔离、copyout 与三代共享）|
+| `sigtest` | 信号屏蔽、处理器返回、进程组停止/继续自检 |
 
-镜像里共有 **34** 个用户程序（即 `UPROGS` 的 34 项）。不带参数运行 `help` 会按类别列出其中 **33 条**——除 `help` 自身以外的全部命令——并把 miniOS 新增的 13 条用 `*` 标出；`help ps` 则只显示该命令的用法与补充细节。`help` 本身是 miniOS 的 14 个新增程序之一，没有把自己列进索引（一个刻意的取舍），但它与其他命令一样只是根目录里的普通程序，`ls` 能看到它。Shell 内建 `cd`；其余命令通常通过 exec 运行。
+镜像里共有 **35** 个用户程序（即 `UPROGS` 的 35 项）。不带参数运行 `help` 会按类别列出其中 **34 条**——除 `help` 自身以外的全部命令——并把 miniOS 新增的命令用 `*` 标出；`help ps` 则只显示该命令的用法与补充细节。`help` 本身没有把自己列进索引，但它与其他命令一样只是根目录里的普通程序。Shell 内建 `cd`、`jobs`、`fg PGID`、`bg PGID`；其余命令通常通过 exec 运行。
 
 ```
 $ ps
@@ -122,7 +122,7 @@ pid  ppid state  vsz  rss  usr sys prio name
 | 字段 | 含义 |
 | --- | --- |
 | `pid` / `ppid` | 进程号 / 父进程号 |
-| `state` | `PSTATE_UNUSED` … `PSTATE_ZOMBIE`（数值与 `enum procstate` 对齐） |
+| `state` | `PSTATE_UNUSED` … `PSTATE_ZOMBIE`（包含 `PSTATE_STOPPED`，数值与 `enum procstate` 对齐） |
 | `sz` | 虚拟内存大小（**不是**常驻内存 RSS） |
 | `rss` | 常驻内存大小：`va < sz` 的已映射页数 × `PGSIZE`（批次 4 加入） |
 | `u_ticks` / `k_ticks` | 用户态 / 内核态累计 tick（批次 3 加入） |
@@ -428,6 +428,16 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 | 27 | `SYS_fsinfo` | `int fsinfo(struct fsstat *st)` | `0`，或 `-1` |
 | 28 | `SYS_sysinfo` | `int sysinfo(struct sysinfo *info)` | `0`，或 `-1` |
 | 29 | `SYS_setprio` | `int setprio(int pid, int prio)` | `0`，或 `-1` |
+| 30 | `SYS_sigaction` | `int sigaction(int sig, void (*handler)(int))` | `0`，或 `-1` |
+| 31 | `SYS_sigmask` | `int sigmask(int mask)` | `0` |
+| 32 | `SYS_sigreturn` | `int sigreturn(void)` | 恢复被中断上下文 |
+| 33 | `SYS_signal` | `int signal(int pid, int sig)` | `0`，或 `-1` |
+| 34 | `SYS_killpg` | `int killpg(int pgid, int sig)` | `0`，或 `-1` |
+| 35 | `SYS_setpgid` | `int setpgid(int pid, int pgid)` | `0`，或 `-1` |
+| 36 | `SYS_getpgid` | `int getpgid(void)` | 当前进程组号 |
+| 37 | `SYS_tcsetpgrp` | `int tcsetpgrp(int pgid)` | `0`，或 `-1` |
+| 38 | `SYS_waitpg` | `int waitpg(int pgid, int *status)` | 组内直接子进程 pid，停止事件写入状态 `-2`，或 `-1` |
+| 39 | `SYS_jobstate` | `int jobstate(int pgid)` | 不存在 `0` / 运行 `1` / 全部停止 `2` |
 
 编号定义在 `kernel/syscall.h`，分发表在 `kernel/syscall.c`，实现在 `kernel/sysproc.c`，用户桩由 `user/usys.pl` 生成。
 
@@ -455,6 +465,7 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 | `user/priotest.c` | 调度优先级与老化的自检程序 |
 | `user/kmemtest.c` | 分配器会计（守恒律）与泄漏的自检程序 |
 | `user/cowtest.c` | 写时复制 fork 的自检程序：fork 代价、写隔离、copyout、三代共享 |
+| `user/sigtest.c` | 信号屏蔽、用户处理器返回及进程组停止/继续自检 |
 
 ### 修改
 
@@ -464,19 +475,21 @@ vm_rss(pagetable_t pagetable, uint64 sz)
 | `kernel/vm.c` | `vm_rss()` 驻留页统计（递归遍历三级页表）；`vmfaults()` 按需分页计数；批次 8 的写时复制 `uvmcopy()`、`cowfault()` 与 `copyout()` 的 COW 分支 |
 | `kernel/fs.c` | O(1) 块/inode 计数器；`fscount_scan()`、`fscount_walk()`、`fsinfo()`（含 `nmeta` 推导） |
 | `kernel/printk.c` | 无锁日志环形缓冲区；`kputc()` tee；`klog_read()` |
-| `kernel/proc.h` | `struct proc` 增加 `u_ticks` / `k_ticks` / `xutime` / `xktime`；批次 6 增加 `prio` / `cur_prio`（受 `p->lock` 保护） |
-| `kernel/proc.c` | `allocproc()` 清零计数；`psinfo()` 快照 + 编译期页大小断言；`cpu_online_inc()`/`ncpu_online()`；批次 6 的 `scheduler()` 单遍择优 + 老化、`ksetprio()` |
-| `kernel/trap.c` | `clockintr()` 按 hart 计费并拆分为用户/内核态；批次 8 在 `usertrap()` 里接上写时复制缺页 |
+| `kernel/proc.h` | `struct proc` 增加 CPU 计数、进程组、信号待处理/屏蔽状态、处理器与恢复帧；增加 `STOPPED` 状态 |
+| `kernel/proc.c` | 原有进程快照/调度/优先级能力；新增信号投递、组信号、终端前台组、停止/继续和 `waitpg()` |
+| `kernel/trap.c` | CPU 时间计费、COW 缺页及返回用户态前的信号投递 |
+| `kernel/console.c` | Ctrl-C/Ctrl-Z 前台组投递；中断控制台读取并清除未提交输入 |
 | `kernel/riscv.h` | `PTE_COW`：Sv39 留给软件的 PTE 位 8 |
 | `kernel/sysinfo.h` | `struct sysinfo`；批次 8 追加 5 个共享 / COW 字段 |
-| `kernel/sysproc.c` | `sys_psinfo` / `sys_freemem` / `sys_klog` / `sys_sysinfo` / `sys_setprio` |
+| `kernel/sysproc.c` | 观测/调度系统调用及信号、进程组、终端作业控制系统调用 |
 | `kernel/main.c` | 每个 hart 进入 `scheduler()` 前调用 `cpu_online_inc()` |
 | `kernel/bio.c` | `bcache_hits` / `bcache_misses` 计数器与 `bio_stats()` |
 | `kernel/virtio_disk.c` | `disk_reads_cnt` / `disk_writes_cnt` 计数器与 `disk_stats()` |
 | `kernel/syscall.h` / `.c` | 新系统调用编号与分发表 |
 | `kernel/defs.h` | 新函数原型 |
 | `user/user.h` / `usys.pl` | 新系统调用声明与桩 |
-| `Makefile` | 批次 1–8 的 `UPROGS` 增加 12 个用户程序（`ps` / `free` / `dmesg` / `top` / `neofetch` / `cputest` / `df` / `waitxtest` / `help` / `priotest` / `kmemtest` / `cowtest`） |
+| `user/sh.c` | 前后台进程组、`jobs`、`fg PGID`、`bg PGID`；Shell 忽略前台信号并恢复提示符 |
+| `Makefile` | 批次 1–8 的 12 个 miniOS 用户程序及阶段二的 `sigtest` |
 
 ---
 
@@ -509,13 +522,14 @@ python3 test-harness.py                        # 宿主错误路径回归
 ./test-xv6.py dedicated --cpus 1 --repeat 10   # 连续验收，失败即停
 ./test-xv6.py dedicated --cpus 3 --repeat 10
 ./test-xv6.py cowtest --cpus 3                  # 单个专用测试
+./test-xv6.py sigtest --cpus 1 --repeat 3      # 信号与进程组专项回归
 ./test-xv6.py usertests --cpus 1               # 完整回归
 ./test-xv6.py usertests --cpus 3
 ./test-xv6.py crash --cpus 1
 ./test-xv6.py crash --cpus 3
 ```
 
-`dedicated` 包含 cowtest、kmemtest、waitxtest、cputest、priotest、mixstress。
+`dedicated` 包含 cowtest、kmemtest、waitxtest、cputest、priotest、mixstress、sigtest。
 每个专用测试默认超时 120 秒，可用 `--timeout` 调整；完整 usertests 为
 600 秒。`--repeat` 表示重复验证，绝不自动重试失败。
 每次运行重新生成 fs.img，会覆盖镜像中的手工文件；同一目录不要并行测试。
@@ -564,7 +578,7 @@ data   blocks  1953  1281  672
 inodes  200 total, 32 used, 168 free
 ```
 
-这是早期版本镜像首次启动后的历史示例，当前镜像已含 34 个程序，用量会变化：1328 个已用块里有 47 块是 mkfs 标出的元数据（boot / super / log / inode / 位图），其余 1281 块存放 `README` 与 29 个用户程序。
+这是早期版本镜像首次启动后的历史示例；当时镜像含 34 个程序，用量会变化：1328 个已用块里有 47 块是 mkfs 标出的元数据（boot / super / log / inode / 位图），其余 1281 块存放 `README` 与 29 个用户程序。
 
 两种口径共享同一个 free 值：元数据块全部标记为已用，空闲块不可能落在元数据区，所以"整盘"与"数据块"两种视角下的 free 必定相同——这不是打印错误。
 
@@ -646,7 +660,9 @@ kmemtest: OK (conserved, no leak over 3 rounds)
 ## 已知限制
 
 - 教学配置为最多 64 个进程、每进程 16 个文件描述符、约 2 MiB 文件系统；扩大容量需要同时评估日志、缓存和内存。
-- 尚无用户身份/访问权限、信号处理器和终端作业控制；Ctrl-C 不能中断前台任务，`top` 仍有界运行。
+- 尚无用户身份/访问权限；信号接口是教学用子集，用户处理器需显式调用 `sigreturn()`，每个进程只保存一层处理器上下文，运行期间屏蔽其他可屏蔽信号。
+- Shell 作业表最多保存 16 项；`fg`、`bg` 要求显式 PGID。尚无 POSIX 会话、后台终端读的 SIGTTIN 规则或完整终端行规程。
+- `top` 无参数时持续刷新，可用 Ctrl-C 终止；`top n` 运行指定轮数后退出。
 
 - **`PTE_COW` 可以在引用计数为 1 时仍然挂着**：子进程退出后父进程的页保持"只读 + COW"标记，下一次写由 `cowfault()` 的快捷路径就地修好、不产生拷贝。因此任何查看 PTE 的代码都不该假设"只读页一定没有 `PTE_COW`"，而 `psinfo()`/`vm_rss()` 这类只读遍历不受影响。
 - **`sysinfo()` 多了一次 O(NPAGE) 的扫描**：`pages_shared_ref` 为了与 O(1) 计数器可比，必须在同一次调用里扫完 32 KiB 状态表，且全程持 `kmem.lock`。这是跨校验的代价，由 `neofetch` / `kmemtest` / `cowtest` / `priotest` 四个调用者承担。
@@ -674,7 +690,7 @@ kmemtest: OK (conserved, no leak over 3 rounds)
 
 已完成批次 1–8。批次 6 的调度器优先级与批次 8 的写时复制 fork 见其各自的小节；批次 5 的选型讨论保留在 `docs/batch5-plan.md` 第 7 章。
 
-[miniOS 路线图](docs/minios-roadmap.md) 的阶段一自动化验证已完成，本地验收见 [验证记录](docs/stage1-validation.md)。接下来实施信号与终端作业控制，再补充身份与权限；虚拟内存、存储和网络扩展单独选型。
+[miniOS 路线图](docs/minios-roadmap.md) 的阶段一自动化验证与阶段二信号/终端作业控制均已通过本地验收。阶段一记录见 [验证记录](docs/stage1-validation.md)；接下来实施身份与权限，虚拟内存、存储和网络扩展单独选型。
 
 ---
 
