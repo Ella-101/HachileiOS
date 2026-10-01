@@ -42,6 +42,13 @@ main(int argc, char **argv)
       while (uptime() < end)
         for (int j = 0; j < 100000; j++)
           sink++;
+      // Read the counter before leaving.  A local that is only ever written
+      // makes -Wunused-but-set-variable fire, and this build hands -Werror to
+      // the compiler, so on some toolchains the child would not build at all.
+      // sink advances in steps of 100000, so the branch is never taken; it is
+      // the same impossible-value guard cputest.c and waitxtest.c already use.
+      if (sink == 42)
+        printf("priotest: impossible\n");
       exit(0);
     }
   }
