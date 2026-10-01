@@ -154,12 +154,16 @@ consoleintr(int c)
 
   switch (c) {
   case C('C'):
-    consputc('^'); consputc('C'); consputc('\n');
+    consputc('^');
+    consputc('C');
+    consputc('\n');
     cons.r = cons.w = cons.e;
     tty_interrupt();
     break;
   case C('Z'):
-    consputc('^'); consputc('Z'); consputc('\n');
+    consputc('^');
+    consputc('Z');
+    consputc('\n');
     tty_signal(5);
     break;
   case C('P'): // Print process list.

@@ -14,7 +14,11 @@
 #define MAXARGS 10
 #define MAXJOBS 16
 
-struct job { int pgid; int active; int stopped; };
+struct job {
+  int pgid;
+  int active;
+  int stopped;
+};
 static struct job jobs[MAXJOBS];
 
 static int
