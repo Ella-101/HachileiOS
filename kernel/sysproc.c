@@ -244,53 +244,90 @@ sys_setprio(void)
   return ksetprio(pid, prio);
 }
 
-uint64 sys_signal(void) {
+uint64
+sys_signal(void)
+{
   int pid, sig;
-  argint(0, &pid); argint(1, &sig);
+  argint(0, &pid);
+  argint(1, &sig);
   return ksignal(pid, sig);
 }
 
-uint64 sys_killpg(void) {
+uint64
+sys_killpg(void)
+{
   int pgid, sig;
-  argint(0, &pgid); argint(1, &sig);
+  argint(0, &pgid);
+  argint(1, &sig);
   return ksignalpg(pgid, sig);
 }
 
-uint64 sys_sigaction(void) {
-  int sig; uint64 handler;
-  argint(0, &sig); argaddr(1, &handler);
+uint64
+sys_sigaction(void)
+{
+  int sig;
+  uint64 handler;
+  argint(0, &sig);
+  argaddr(1, &handler);
   return ksigaction(sig, handler);
 }
 
-uint64 sys_sigmask(void) {
-  int mask; argint(0, &mask);
+uint64
+sys_sigmask(void)
+{
+  int mask;
+  argint(0, &mask);
   return ksigmask((uint)mask);
 }
 
-uint64 sys_sigreturn(void) { return ksigreturn(); }
+uint64
+sys_sigreturn(void)
+{
+  return ksigreturn();
+}
 
-uint64 sys_setpgid(void) {
-  int pid, pgid; argint(0, &pid); argint(1, &pgid);
-  if (pid == 0) pid = myproc()->pid;
+uint64
+sys_setpgid(void)
+{
+  int pid, pgid;
+  argint(0, &pid);
+  argint(1, &pgid);
+  if (pid == 0)
+    pid = myproc()->pid;
   return ksetpgid(pid, pgid);
 }
 
-uint64 sys_getpgid(void) { return kgetpgid(); }
+uint64
+sys_getpgid(void)
+{
+  return kgetpgid();
+}
 
-uint64 sys_tcsetpgrp(void) {
-  int pgid; argint(0, &pgid);
-  if (pgid <= 0) return -1;
+uint64
+sys_tcsetpgrp(void)
+{
+  int pgid;
+  argint(0, &pgid);
+  if (pgid <= 0)
+    return -1;
   tty_setpgid(pgid);
   return 0;
 }
 
-uint64 sys_waitpg(void) {
-  int pgid; uint64 status;
-  argint(0, &pgid); argaddr(1, &status);
+uint64
+sys_waitpg(void)
+{
+  int pgid;
+  uint64 status;
+  argint(0, &pgid);
+  argaddr(1, &status);
   return kwaitpg(pgid, status);
 }
 
-uint64 sys_jobstate(void) {
-  int pgid; argint(0, &pgid);
+uint64
+sys_jobstate(void)
+{
+  int pgid;
+  argint(0, &pgid);
   return kjobstate(pgid);
 }

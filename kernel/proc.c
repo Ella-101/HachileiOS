@@ -849,26 +849,36 @@ kwaitpg(int pgid, uint64 addr)
         if (pp->state == STOPPED) {
           pid = pp->pid;
           status = -2;
-          if (addr && copyout(p->pagetable, p->sz, addr,
-                              (char *)&status, sizeof(status)) < 0) {
-            release(&pp->lock); release(&wait_lock); return -1;
+          if (addr && copyout(p->pagetable, p->sz, addr, (char *)&status,
+                              sizeof(status)) < 0) {
+            release(&pp->lock);
+            release(&wait_lock);
+            return -1;
           }
-          release(&pp->lock); release(&wait_lock); return pid;
+          release(&pp->lock);
+          release(&wait_lock);
+          return pid;
         }
         if (pp->state == ZOMBIE) {
           pid = pp->pid;
-          if (addr && copyout(p->pagetable, p->sz, addr,
-                              (char *)&pp->xstate, sizeof(pp->xstate)) < 0) {
-            release(&pp->lock); release(&wait_lock); return -1;
+          if (addr && copyout(p->pagetable, p->sz, addr, (char *)&pp->xstate,
+                              sizeof(pp->xstate)) < 0) {
+            release(&pp->lock);
+            release(&wait_lock);
+            return -1;
           }
-          pp->parent = 0; freeproc(pp); release(&pp->lock);
-          release(&wait_lock); return pid;
+          pp->parent = 0;
+          freeproc(pp);
+          release(&pp->lock);
+          release(&wait_lock);
+          return pid;
         }
       }
       release(&pp->lock);
     }
     if (!havekids || killed(p) || signal_pending(p)) {
-      release(&wait_lock); return -1;
+      release(&wait_lock);
+      return -1;
     }
     sleep_prepare(p);
     release(&wait_lock);
@@ -923,8 +933,7 @@ signal_deliver(struct proc *p)
   uint64 handler;
   acquire(&p->lock);
   for (sig = 1; sig <= NSIG; sig++)
-    if ((p->pending & (1U << sig)) &&
-        (sig == 3 || !(p->sigmask & (1U << sig))))
+    if ((p->pending & (1U << sig)) && (sig == 3 || !(p->sigmask & (1U << sig))))
       break;
   if (sig > NSIG) {
     release(&p->lock);
@@ -971,8 +980,8 @@ ksigaction(int sig, uint64 handler)
     return -1;
   if (handler != (uint64)-1 && handler != (uint64)-2) {
     pte = walk(p->pagetable, handler, 0);
-    if (handler >= p->sz || pte == 0 || !(*pte & PTE_V) ||
-        !(*pte & PTE_U) || !(*pte & PTE_X))
+    if (handler >= p->sz || pte == 0 || !(*pte & PTE_V) || !(*pte & PTE_U) ||
+        !(*pte & PTE_X))
       return -1;
   }
   acquire(&p->lock);

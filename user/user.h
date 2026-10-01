@@ -37,13 +37,13 @@ int fsinfo(struct fsstat *st);
 int sysinfo(struct sysinfo *info);
 int setprio(int pid, int prio);
 #define SIGTERM 1
-#define SIGINT 2
+#define SIGINT  2
 #define SIGKILL 3
 #define SIGSTOP 4
 #define SIGTSTP 5
 #define SIGCONT 6
-#define SIG_DFL ((void (*)(int))-1)
-#define SIG_IGN ((void (*)(int))-2)
+#define SIG_DFL ((void (*)(int)) - 1)
+#define SIG_IGN ((void (*)(int)) - 2)
 int signal(int pid, int sig);
 int killpg(int pgid, int sig);
 int sigaction(int sig, void (*handler)(int));
