@@ -28,6 +28,13 @@ struct superblock {
 #define FSMAGIC     0x10203041
 #define FSMAGIC_OLD 0x10203040
 
+// Permission bits, in the position they occupy within one class of
+// the nine-bit mode: perm_ok() picks a class, shifts it into place,
+// and then requires every bit that was asked for.
+#define ACC_R 04
+#define ACC_W 02
+#define ACC_X 01
+
 // Ten direct blocks rather than the usual twelve: the three 16-bit
 // fields the inode gained (mode, uid, gid) have to come out of the same
 // 64 bytes, because mkfs asserts BSIZE % sizeof(struct dinode) == 0 and

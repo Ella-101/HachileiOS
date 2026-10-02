@@ -134,12 +134,13 @@ sys_link(void)
 {
   char name[DIRSIZ], new[MAXPATH], old[MAXPATH];
   struct inode *dp, *ip;
+  struct cred cred = mycred();
 
   if (argstr(0, old, MAXPATH) < 0 || argstr(1, new, MAXPATH) < 0)
     return -1;
 
   begin_op();
-  if ((ip = namei(old)) == 0) {
+  if ((ip = namei(old, cred)) == 0) {
     end_op();
     return -1;
   }
@@ -161,9 +162,18 @@ sys_link(void)
   iupdate(ip);
   iunlock(ip);
 
-  if ((dp = nameiparent(new, name)) == 0)
+  if ((dp = nameiparent(new, name, cred)) == 0)
     goto bad;
   ilock(dp);
+
+  // A new link is a new entry in that directory, so it needs write
+  // permission there.  The file being linked to is not consulted:
+  // its mode says nothing about who may add another name for it.
+  if (!perm_ok(dp, cred, ACC_W)) {
+    iunlockput(dp);
+    goto bad;
+  }
+
   // dp may have been unlinked while we resolved it; linking into an
   // orphaned directory leaks ip (itrunc discards the record without
   // dropping ip->nlink).  create() has the same guard.
@@ -214,17 +224,25 @@ sys_unlink(void)
   struct dirent de;
   char name[DIRSIZ], path[MAXPATH];
   uint off;
+  struct cred cred = mycred();
 
   if (argstr(0, path, MAXPATH) < 0)
     return -1;
 
   begin_op();
-  if ((dp = nameiparent(path, name)) == 0) {
+  if ((dp = nameiparent(path, name, cred)) == 0) {
     end_op();
     return -1;
   }
 
   ilock(dp);
+
+  // Removing a name modifies the directory, so it takes write
+  // permission on the directory -- not on the file, whose own mode
+  // says nothing about who may unlink it.  There is no sticky bit,
+  // so this is the whole rule.
+  if (!perm_ok(dp, cred, ACC_W))
+    goto bad;
 
   // Cannot unlink "." or "..".
   if (namecmp(name, ".") == 0 || namecmp(name, "..") == 0)
@@ -265,12 +283,12 @@ bad:
 }
 
 static struct inode *
-create(char *path, short type, short major, short minor)
+create(char *path, short type, short major, short minor, struct cred cred)
 {
   struct inode *ip, *dp;
   char name[DIRSIZ];
 
-  if ((dp = nameiparent(path, name)) == 0)
+  if ((dp = nameiparent(path, name, cred)) == 0)
     return 0;
 
   ilock(dp);
@@ -292,6 +310,15 @@ create(char *path, short type, short major, short minor)
     if (type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
       return ip;
     iunlockput(ip);
+    return 0;
+  }
+
+  // Only a new entry needs write permission on the directory.
+  // Opening a name that already exists is governed by the file's
+  // own mode, which sys_open() checks -- so this test has to come
+  // after the lookup above, not before it.
+  if (!perm_ok(dp, cred, ACC_W)) {
+    iunlockput(dp);
     return 0;
   }
 
@@ -347,6 +374,7 @@ sys_open(void)
   int fd, omode;
   struct file *f;
   struct inode *ip;
+  struct cred cred = mycred();
   int n;
 
   argint(1, &omode);
@@ -356,13 +384,13 @@ sys_open(void)
   begin_op();
 
   if (omode & O_CREATE) {
-    ip = create(path, T_FILE, 0, 0);
+    ip = create(path, T_FILE, 0, 0, cred);
     if (ip == 0) {
       end_op();
       return -1;
     }
   } else {
-    if ((ip = namei(path)) == 0) {
+    if ((ip = namei(path, cred)) == 0) {
       end_op();
       return -1;
     }
@@ -372,6 +400,29 @@ sys_open(void)
       end_op();
       return -1;
     }
+  }
+
+  // Permission is decided here and nowhere else.  An open descriptor
+  // is not re-checked on read or write, so changing the mode of a file
+  // after open() does not affect a descriptor that is already open.
+  // That is POSIX behaviour, and the alternative -- checking at every
+  // read and write -- would leave a window in which the permission
+  // changes between the check and the use.
+  //
+  // Truncating is a write, so O_TRUNC asks for ACC_W even when the
+  // caller said O_RDONLY.  A directory was forced to O_RDONLY above,
+  // so the only bit it can reach here is ACC_R -- which is what
+  // listing one requires.
+  int need = 0;
+  if (!(omode & O_WRONLY))
+    need |= ACC_R;
+  if (omode & (O_WRONLY | O_RDWR | O_TRUNC))
+    need |= ACC_W;
+
+  if (!perm_ok(ip, cred, need)) {
+    iunlockput(ip);
+    end_op();
+    return -1;
   }
 
   if (ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)) {
@@ -416,7 +467,8 @@ sys_mkdir(void)
   struct inode *ip;
 
   begin_op();
-  if (argstr(0, path, MAXPATH) < 0 || (ip = create(path, T_DIR, 0, 0)) == 0) {
+  if (argstr(0, path, MAXPATH) < 0 ||
+      (ip = create(path, T_DIR, 0, 0, mycred())) == 0) {
     end_op();
     return -1;
   }
@@ -436,7 +488,7 @@ sys_mknod(void)
   argint(1, &major);
   argint(2, &minor);
   if ((argstr(0, path, MAXPATH)) < 0 ||
-      (ip = create(path, T_DEVICE, major, minor)) == 0) {
+      (ip = create(path, T_DEVICE, major, minor, mycred())) == 0) {
     end_op();
     return -1;
   }
@@ -451,14 +503,24 @@ sys_chdir(void)
   char path[MAXPATH];
   struct inode *ip;
   struct proc *p = myproc();
+  struct cred cred = mycred();
 
   begin_op();
-  if (argstr(0, path, MAXPATH) < 0 || (ip = namei(path)) == 0) {
+  if (argstr(0, path, MAXPATH) < 0 || (ip = namei(path, cred)) == 0) {
     end_op();
     return -1;
   }
   ilock(ip);
   if (ip->type != T_DIR) {
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+  // Entering a directory is search (x) on it.  namex() already
+  // checked every directory walked through to get here; the last
+  // component is never walked through, so its own check is this
+  // one.
+  if (!perm_ok(ip, cred, ACC_X)) {
     iunlockput(ip);
     end_op();
     return -1;
@@ -584,7 +646,7 @@ sys_chmod(void)
   argint(1, &pmode);
 
   begin_op();
-  if ((ip = namei(path)) == 0) {
+  if ((ip = namei(path, mycred())) == 0) {
     end_op();
     return -1;
   }
@@ -626,7 +688,7 @@ sys_chown(void)
     return -1;
 
   begin_op();
-  if ((ip = namei(path)) == 0) {
+  if ((ip = namei(path, mycred())) == 0) {
     end_op();
     return -1;
   }

@@ -5,6 +5,9 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+// For the ACC_* permission bits: exec asks whether the file may be
+// executed (see the check in kexec()).
+#include "fs.h"
 #include "elf.h"
 
 static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
@@ -39,11 +42,21 @@ kexec(char *path, char **argv)
   begin_op();
 
   // Open the executable file.
-  if ((ip = namei(path)) == 0) {
+  // kexec() acts for the process that called exec(), so the
+  // identity to look the path up with is its own.
+  if ((ip = namei(path, mycred())) == 0) {
     end_op();
     return -1;
   }
   ilock(ip);
+
+  // Execute permission, before a single byte of the file is read.
+  // kexec() runs on behalf of the process that called exec(), which
+  // is the only actor there is, so the identity is its own.  This is
+  // also the one place uid 0 is not exempt: a file with no x bit in
+  // any class is not a program, and running one has to fail.
+  if (!perm_ok(ip, mycred(), ACC_X))
+    goto bad;
 
   // Read the ELF header.
   if (readi(ip, 0, (uint64)&elf, 0, sizeof(elf)) != sizeof(elf))

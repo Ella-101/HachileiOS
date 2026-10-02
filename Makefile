@@ -168,6 +168,7 @@ UPROGS=\
 	$U/_id\
 	$U/_idtest\
 	$U/_chmod\
+	$U/_permtest\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

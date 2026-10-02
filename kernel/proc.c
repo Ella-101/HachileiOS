@@ -121,6 +121,17 @@ myproc(void)
   return p;
 }
 
+// The identity to hand to the permission checks: "who is
+// asking".  Reading it here, at the call site, is what lets
+// perm_ok() depend on its arguments and nothing else.
+struct cred
+mycred(void)
+{
+  struct proc *p = myproc();
+
+  return (struct cred){p->uid, p->gid};
+}
+
 int
 allocpid()
 {
@@ -299,7 +310,11 @@ userinit(void)
   p = allocproc();
   initproc = p;
 
-  p->cwd = namei("/");
+  // "/" resolves without walking a single directory, and this is
+  // kernel setup rather than a process asking on its own behalf, so
+  // this identity is never consulted -- but the parameter is not
+  // optional, and a system identity is what belongs here.
+  p->cwd = namei("/", (struct cred){0, 0});
 
   p->state = RUNNABLE;
 

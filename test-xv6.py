@@ -317,7 +317,8 @@ def test_usertests(test=""):
         q.cmd("usertests" + opt + "\n")
         q.monitor('^ALL TESTS PASSED', progress='test', timeout=timeout)
 
-DEDICATED = ("cowtest", "kmemtest", "waitxtest", "cputest", "priotest", "mixstress", "sigtest")
+DEDICATED = ("cowtest", "kmemtest", "waitxtest", "cputest", "priotest",
+             "idtest", "permtest", "mixstress", "sigtest")
 
 
 def git_metadata(*command):

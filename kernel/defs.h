@@ -1,6 +1,7 @@
 // clang-format off
 struct buf;
 struct context;
+struct cred;
 struct file;
 struct fsstat;
 struct inode;
@@ -51,8 +52,9 @@ void            iunlock(struct inode*);
 void            iunlockput(struct inode*);
 void            iupdate(struct inode*);
 int             namecmp(const char*, const char*);
-struct inode*   namei(char*);
-struct inode*   nameiparent(char*, char*);
+struct inode*   namei(char*, struct cred);
+struct inode*   nameiparent(char*, char*, struct cred);
+int             perm_ok(struct inode*, struct cred, int);
 int             readi(struct inode*, int, uint64, uint, uint);
 void            stati(struct inode*, struct stat*);
 int             writei(struct inode*, int, uint64, uint, uint);
@@ -123,6 +125,7 @@ int             killed(struct proc*);
 void            setkilled(struct proc*);
 struct cpu*     mycpu(void);
 struct proc*    myproc();
+struct cred     mycred(void);
 void            procinit(void);
 void            scheduler(void) __attribute__((noreturn));
 void            sched(void);

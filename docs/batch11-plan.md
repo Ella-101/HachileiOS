@@ -1,6 +1,6 @@
 # 批次 11 计划：用户身份与权限（阶段三）
 
-> 状态：第一、二批**已实施**（第一批已推送并通过 CI，第二批含磁盘格式变更，待在 WSL 验证）；第三至五批未开工。
+> 状态：第一、二、三批**已实施**（第一、二批已推送、CI 全绿；第三批在 WSL 验证中）；第四、五批未开工。
 > 若需改选，见每条的"影响面"。
 > 基线：上游 `56b9bf7`（阶段一、二已完成并合并）。分支：`batch11-identity-permissions`。
 > 依据：`docs/minios-roadmap.md` §5 列出的六项要求；本文是它的落地设计与风险清单。
@@ -149,30 +149,44 @@ struct dinode {
 ### 5.2 权限判定（放在 `kernel/fs.c`，只有一份）
 
 ```c
-// acc: ACC_R(4) / ACC_W(2) / ACC_X(1)
-static int
-perm_ok(struct inode *ip, ushort uid, ushort gid, int acc)
+// acc: ACC_R(4) / ACC_W(2) / ACC_X(1), OR'ed; every requested bit must be granted.
+int
+perm_ok(struct inode *ip, struct cred cred, int acc)
 {
   uint shift;
 
-  if (uid == 0)
-    return acc == ACC_X ? (ip->mode & 0111) != 0 : 1;
+  if (cred.uid == 0)
+    return (acc & ACC_X) == 0 || (ip->mode & 0111) != 0;
 
-  if (uid == ip->uid)
+  if (cred.uid == ip->uid)
     shift = 6;
-  else if (gid == ip->gid)
+  else if (cred.gid == ip->gid)
     shift = 3;
   else
     shift = 0;
 
-  return (ip->mode >> shift) & acc;
+  return ((ip->mode >> shift) & acc) == acc;
 }
 ```
+
+**实施时改掉了冻结版的一处错误**：原稿写的是 `(ip->mode >> shift) & acc`，用 `&` 的
+非零值当"允许"。单比特请求下两者等价，但 `sys_open` 会同时要 R 和 W（`O_RDWR`），
+而 `&` 的含义是"至少有一位命中" —— 一个 `0400` 的文件能满足读写请求里"读"的那一位，
+于是**写被静默放行**。判据必须是"每一位都被授出"，即 `== acc`。
+
+`acc` 是掩码而不是单比特，也让 root 的分支写成了
+`(acc & ACC_X) == 0 || (ip->mode & 0111) != 0`：root 无条件通过读写位，
+但只要请求里含 X，就仍要看有没有任一 x 位。
 
 两处语义要点，都必须写进注释：
 
 1. **不回退**。只匹配最具体的那一类：属主命中就只看属主位。若写成「属主不通过再看 group、group 不通过再看 other」，一个被属主故意设成 `0600` 的文件会被同组或其他人读到 —— 这是经典错误，而且是**静默提权**。
 2. **root 也要过执行位**。root 绕过读写，但执行一个没有任何 x 位的文件仍然应当被拒绝。这一条在本项目里有实际意义：`exec` 走的就是这条判定。
+
+   实施时补了一条推论并写进了代码注释：**目录搜索（`namex` 的 x 检查）用同一条规则**，
+   于是一个 x 位全清的目录对所有人（包括 root）都不可进入。代价是要靠父目录 `chmod`
+   才能救回来 —— 而这条路是通的，因为抵达目录本身不需要进入它。选择"一条规则"而不是
+   "文件和目录各一条"，是为了让安全判定的分支数最少。
 
 ### 5.3 目录搜索权限与 `namei` 的签名
 
@@ -182,7 +196,7 @@ perm_ok(struct inode *ip, ushort uid, ushort gid, int acc)
 
 ```
 kernel/exec.c:42        namei(path)            调用者的身份
-kernel/proc.c:297       namei("/")             allocproc 中，尚无身份 ⇒ 用系统身份(root)
+kernel/proc.c:302       namei("/")             userinit 中（实施时更正：不是 allocproc）⇒ root
 kernel/sysfile.c:134    namei(old)             link
 kernel/sysfile.c:156    nameiparent(new,...)   link
 kernel/sysfile.c:214    nameiparent(path,...)  unlink
@@ -191,7 +205,7 @@ kernel/sysfile.c:351    namei(path)            open
 kernel/sysfile.c:442    namei(path)            chdir
 ```
 
-**推荐：加一个 `struct cred { ushort uid, gid; }` 参数**，调用点用 `mycred()` 取。理由是「规则只有一份」这条项目原则 —— 把身份显式传进去，判定点在哪里、用的是谁的身份，读代码时一眼可见；而在函数内部偷偷 `myproc()` 会让 `namei` 变成一个隐式依赖全局状态、也因此难以单独验证的函数。代价就是上面这 8 处。
+**（已实施）加一个 `struct cred { ushort uid, gid; }` 参数**，调用点用 `mycred()` 取。理由是「规则只有一份」这条项目原则 —— 把身份显式传进去，判定点在哪里、用的是谁的身份，读代码时一眼可见；而在函数内部偷偷 `myproc()` 会让 `namei` 变成一个隐式依赖全局状态、也因此难以单独验证的函数。代价就是上面这 8 处。
 
 ### 5.4 用户可见的结构改动
 
@@ -275,6 +289,36 @@ exec 保留身份（fork 一个孙进程去 `exec id`，把输出经管道读回
 `permtest` 的形状值得先定下来：**它必须以 root 启动然后 fork** —— 子进程 `setuid(1001)` 降权后尝试越权操作，父进程保持 root 验证"该拒绝的确实被拒绝了"。降权不可逆（§3.2），所以测试不能在一个进程里既降权又验权。
 
 **验收**：`permtest` 的每一项负向断言成立（读不到别人的 `0600` 文件、写不进别人的目录、穿不过 `0700` 的目录、执行不了没有 x 位的文件、不能 unlink 别人的文件）；`usertests` 在 root 下继续全过。
+
+**已实施（第三步）**：`kernel/fs.h` 新增 `ACC_R/ACC_W/ACC_X`；`kernel/proc.h` 新增 `struct cred`；
+`kernel/fs.c` 新增 `perm_ok()`，`namex()` 每一级目录都要过 x 检查，`namei`/`nameiparent` 增加 cred 参数；
+`kernel/proc.c` 新增 `mycred()`；检查点落在 `sys_open`（按 `omode` 推出需要的位，`O_TRUNC` 也算写）、
+`create`（只在新条目时才要父目录的 w）、`sys_link`/`sys_unlink`（父目录 w）、`sys_chdir`（目标目录 x）、
+`kexec`（ACC_X）；新增 `user/permtest.c`，并把它与 `idtest` 一起加进 `test-xv6.py` 的 `DEDICATED`
+—— **`idtest` 此前只在手工验证里跑过，CI 从未执行它**，这是顺手补上的一个覆盖漏洞。
+
+`permtest` 实际是 23 条断言（root 侧 4 条、降权子进程 19 条），形状与上面预想的不同，值得说明：
+
+- **正向用例不是装饰**。一个"什么都拒绝"的模型能通过全部负向断言，所以每条该成功的也写成断言
+  （`0644` 可读、`0640` 且 gid 命中可读、属主自己的 `0600` 可读写、`0711` 目录可穿不可列）。
+- **`0004` 是专门为"不回退"造的**：文件属主是测试身份、属主位为 0、`other` 位有读。
+  正确实现按属主类判定 ⇒ 拒绝；写成"属主不通过就看 other"的实现会放行 ⇒ 断言立刻失败。
+- **exec 的两种结局都要验**：成功的 exec 不会返回，所以 `want_exec()` 在一个孙进程里试，
+  用退出码区分 —— 拒绝时是我们的 `exit(1)`，成功时是复制过去的 `echo` 退出 0。
+  要一条"该成功"的 exec，就得有一个**模式可控的真程序**：镜像里的程序都属于系统，
+  于是测试把 `/echo` 逐字节复制两份（`0644` 与 `0755`）到自己的目录里再 chmod。
+- **降权前先 `setgid`**（§5.1 的顺序约束），并在降权后断言 `getuid/getgid` 真的变成了 1001 ——
+  否则后面那一片"被拒绝"会因为身份没降下来而失败，且看不出原因。
+- **开始时清理上一轮的残留**：`mkdir` 对已存在的目录报 -1，第二次运行会被误判成权限故障。
+
+**编译期抓到的一个真错误（值得记下来）**：`kernel/exec.c` 用了 `fs.h` 里的 `ACC_X`，
+却没有 include `fs.h`。GCC 的报错是 `'ACC_X' undeclared` —— **指着一个宏名，不指出缺哪个头**，
+很容易去翻错文件。已给 `ccheck.py` 加了第 9 条检查：`.c` 用到的、由某个 `kernel/*.h` 唯一
+定义的宏，必须在它的（传递）include 里。规则的两处边界是实测出来的：**只查 `.c`**
+（头文件刻意依赖 include 顺序，例如 `kernel/proc.h` 用 `param.h` 的 `NCPU`），
+且 include 要**传递**地看（用户程序经 `user/user.h` 拿到 `psinfo.h` 的 `PRIO_LOWEST`）、
+按 basename 匹配（`mkfs` 的 `O_RDWR` 来自宿主的 `<fcntl.h>`）。收紧后全树 87 个文件
+**只报这一处真 bug、零假阳性**，随后修掉。
 
 ### 7.4 批次 4：特权操作与可见性边界
 

@@ -79,6 +79,16 @@ struct trapframe {
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, STOPPED, ZOMBIE };
 #define NSIG 6
 
+// A process's identity.  Mainly this is the pair of fields in
+// struct proc; it is a separate type because it is also the
+// argument the file-system checks take.  Passing it explicitly,
+// rather than reading myproc() inside the check, makes the actor
+// visible at every call site that asks "may I?".
+struct cred {
+  ushort uid;
+  ushort gid;
+};
+
 // Per-process state
 struct proc {
   struct spinlock lock;

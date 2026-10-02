@@ -104,6 +104,11 @@ static struct entry cmds[] = {
    "check the identity rules for fork, exec, setuid and setgid",
    "Run as root; the child demotes itself and probes the rules.", 1},
 
+  {"self-checks", "permtest", "",
+   "check that the permission model refuses what it should",
+   "Run as root.  Makes fixtures in /permtest-dir, then probes them from "
+   "a child that has dropped to uid 1001.", 1},
+
   {"self-checks", "mixstress", "",
    "exercise concurrent fork, COW, pipes and files", 0, 1},
   {"tests", "testrun", "program [args...]",
