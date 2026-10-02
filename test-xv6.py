@@ -25,6 +25,23 @@ parser.add_argument("--artifacts", default="test-results")
 config = argparse.Namespace(cpus=int(os.environ.get("CPUS", "3")), artifacts="test-results")
 sessions = []
 
+def fs_magic():
+    """FSMAGIC, read out of kernel/fs.h rather than written down twice.
+
+    crash_in_log() pokes at fs.img's superblock to find the log header, and
+    used to compare its magic against a literal.  When the inode format
+    changed and the magic moved, this file kept the old number and the crash
+    test failed with "Invalid filesystem superblock" -- a message that points
+    at the image rather than at the stale copy.  The header is the only place
+    the number means anything, so read it from there.
+    """
+    header = Path(__file__).resolve().parent / "kernel" / "fs.h"
+    m = re.search(r"^\s*#define\s+FSMAGIC\s+(0x[0-9a-fA-F]+)",
+                  header.read_text(), re.M)
+    if not m:
+        raise SystemExit(f"cannot read FSMAGIC from {header}")
+    return int(m.group(1), 16)
+
 class QEMU(object):
 
     def __init__(self, reset=False, control=False):
@@ -147,7 +164,7 @@ class QEMU(object):
         with open("fs.img", "rb", buffering=0) as disk:
             disk.seek(1024)
             magic, _, _, _, nlog, logstart, _, _ = struct.unpack("<8I", disk.read(32))
-            if magic != 0x10203040:
+            if magic != fs_magic():
                 self.error("Invalid filesystem superblock")
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
