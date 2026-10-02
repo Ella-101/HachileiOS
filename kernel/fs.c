@@ -62,8 +62,15 @@ void
 fsinit(int dev)
 {
   readsb(dev, &sb);
-  if (sb.magic != FSMAGIC)
-    panic("invalid file system");
+  if (sb.magic != FSMAGIC) {
+    // Two different problems, two different fixes, so the message has
+    // to distinguish them: an image built before the inode gained
+    // mode/uid/gid would otherwise be read with the new offsets and
+    // silently return nonsense.
+    if (sb.magic == FSMAGIC_OLD)
+      panic("fsinit: fs.img uses the old inode format; re-run mkfs");
+    panic("fsinit: not a miniOS file system");
+  }
   initlog(dev, &sb);
   ireclaim(dev);
   // Must come after ireclaim(): reclaiming an orphan inode goes through
@@ -334,6 +341,9 @@ iupdate(struct inode *ip)
   bp = bread(ip->dev, IBLOCK(ip->inum, sb));
   dip = (struct dinode *)bp->data + ip->inum % IPB;
   dip->type = ip->type;
+  dip->mode = ip->mode;
+  dip->uid = ip->uid;
+  dip->gid = ip->gid;
   dip->major = ip->major;
   dip->minor = ip->minor;
   dip->nlink = ip->nlink;
@@ -407,6 +417,9 @@ ilock(struct inode *ip)
     bp = bread(ip->dev, IBLOCK(ip->inum, sb));
     dip = (struct dinode *)bp->data + ip->inum % IPB;
     ip->type = dip->type;
+    ip->mode = dip->mode;
+    ip->uid = dip->uid;
+    ip->gid = dip->gid;
     ip->major = dip->major;
     ip->minor = dip->minor;
     ip->nlink = dip->nlink;
@@ -602,6 +615,9 @@ stati(struct inode *ip, struct stat *st)
   st->type = ip->type;
   st->nlink = ip->nlink;
   st->size = ip->size;
+  st->mode = ip->mode;
+  st->uid = ip->uid;
+  st->gid = ip->gid;
 }
 
 // Read data from inode.

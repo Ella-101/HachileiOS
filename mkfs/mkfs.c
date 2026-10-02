@@ -22,6 +22,19 @@
 
 #define NINODES 200
 
+// Permission bits for what mkfs writes.  On the host every binary is
+// named _something, so that the build system does not run it by
+// accident, and mkfs drops the underscore when writing the name into the
+// image.  That underscore is therefore the only marker available for
+// "this file is a program", and it is what decides the execute bits: the
+// binaries get 0755, and the in-image README -- the sole data file --
+// gets 0644.  Deriving it from the name keeps the result independent of
+// the host file system, which on a drvfs mount reports 0777 for
+// everything and would otherwise make every file executable.
+#define DIR_MODE  0755
+#define PROG_MODE 0755
+#define DATA_MODE 0644
+
 // Disk layout:
 // [ boot block | sb block | log | inode blocks | free bit map | data blocks ]
 
@@ -42,7 +55,7 @@ void wsect(uint, void *);
 void winode(uint, struct dinode *);
 void rinode(uint inum, struct dinode *ip);
 void rsect(uint sec, void *buf);
-uint ialloc(ushort type);
+uint ialloc(ushort type, ushort mode);
 void iappend(uint inum, void *p, int n);
 void die(const char *);
 
@@ -118,7 +131,7 @@ main(int argc, char *argv[])
   memmove(buf, &sb, sizeof(sb));
   wsect(1, buf);
 
-  rootino = ialloc(T_DIR);
+  rootino = ialloc(T_DIR, DIR_MODE);
   assert(rootino == ROOTINO);
 
   bzero(&de, sizeof(de));
@@ -148,12 +161,13 @@ main(int argc, char *argv[])
     // The binaries are named _rm, _cat, etc. to keep the
     // build operating system from trying to execute them
     // in place of system binaries like rm and cat.
-    if (shortname[0] == '_')
+    int isprog = (shortname[0] == '_');
+    if (isprog)
       shortname += 1;
 
     assert(strlen(shortname) <= DIRSIZ);
 
-    inum = ialloc(T_FILE);
+    inum = ialloc(T_FILE, isprog ? PROG_MODE : DATA_MODE);
 
     bzero(&de, sizeof(de));
     de.inum = xshort(inum);
@@ -224,13 +238,16 @@ rsect(uint sec, void *buf)
 }
 
 uint
-ialloc(ushort type)
+ialloc(ushort type, ushort mode)
 {
   uint inum = freeinode++;
   struct dinode din;
 
   bzero(&din, sizeof(din));
   din.type = xshort(type);
+  din.mode = xshort(mode);
+  // uid and gid stay 0: mkfs builds the initial image as root, and the
+  // bzero above is what puts them there.
   din.nlink = xshort(1);
   din.size = xint(0);
   winode(inum, &din);

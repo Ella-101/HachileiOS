@@ -64,3 +64,5 @@ entry("getuid");
 entry("getgid");
 entry("setuid");
 entry("setgid");
+entry("chmod");
+entry("chown");

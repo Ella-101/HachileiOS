@@ -32,6 +32,11 @@ int getuid(void);
 int getgid(void);
 int setuid(int);
 int setgid(int);
+
+// File ownership.  chmod() takes the low nine permission bits; only the
+// owner or uid 0 may call it, and only uid 0 may call chown().
+int chmod(const char *, int);
+int chown(const char *, int, int);
 char *sys_sbrk(int, int);
 int pause(int);
 int uptime(void);

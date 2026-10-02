@@ -42,3 +42,5 @@
 #define SYS_getgid    41
 #define SYS_setuid    42
 #define SYS_setgid    43
+#define SYS_chmod     44
+#define SYS_chown     45

@@ -17,6 +17,14 @@
 #include "file.h"
 #include "fcntl.h"
 
+// Permission bits for an inode create() makes.  A file created by
+// open(..., O_CREATE) is data, so it does not get the execute bits --
+// chmod() is the only way to add them, which keeps "this runs" an
+// explicit decision rather than a side effect of creation.  A directory
+// gets the usual mode, so that it can be entered and listed.
+#define MODE_FILE 0644
+#define MODE_DIR  0755
+
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -296,6 +304,12 @@ create(char *path, short type, short major, short minor)
   ip->major = major;
   ip->minor = minor;
   ip->nlink = 1;
+  // The caller owns what it creates: identity is per-process, and a file
+  // has to record whose it is even while everyone is still uid 0, because
+  // the permission checks that read these fields come next.
+  ip->uid = myproc()->uid;
+  ip->gid = myproc()->gid;
+  ip->mode = (type == T_DIR) ? MODE_DIR : MODE_FILE;
   iupdate(ip);
 
   if (type == T_DIR) { // Create . and .. entries.
@@ -545,5 +559,82 @@ sys_fsinfo(void)
   fsinfo(&st);
   if (copyout(p->pagetable, p->sz, addr, (char *)&st, sizeof(st)) < 0)
     return -1;
+  return 0;
+}
+
+// Change the permission bits of a path.
+//
+// Only the owner, or uid 0, may -- which is why the check reads p->uid
+// rather than consulting the file's own permission bits: "may I chmod
+// this" is a question about identity, not about read/write/execute.
+//
+// Only the low nine bits are kept.  The file type lives in ip->type, not
+// in mode, so there is nothing else in there to preserve; masking here
+// means a caller cannot smuggle type bits in through the mode argument.
+uint64
+sys_chmod(void)
+{
+  char path[MAXPATH];
+  int pmode;
+  struct inode *ip;
+  struct proc *p = myproc();
+
+  if (argstr(0, path, MAXPATH) < 0)
+    return -1;
+  argint(1, &pmode);
+
+  begin_op();
+  if ((ip = namei(path)) == 0) {
+    end_op();
+    return -1;
+  }
+  ilock(ip);
+  if (p->uid != 0 && p->uid != ip->uid) {
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+  ip->mode = pmode & 0777;
+  iupdate(ip);
+  iunlockput(ip);
+  end_op();
+  return 0;
+}
+
+// Hand a file to another identity.
+//
+// uid 0 only, in both directions: a process that could give a file away
+// could shed the permissions it is held to, and one that could take a
+// file could seize one it was never granted.  The bounds are checked
+// before the privilege test so that an impossible uid is rejected for
+// anyone, and so that nothing wider than 16 bits can be written into
+// the field on disk.
+uint64
+sys_chown(void)
+{
+  char path[MAXPATH];
+  int uid, gid;
+  struct inode *ip;
+
+  if (argstr(0, path, MAXPATH) < 0)
+    return -1;
+  argint(1, &uid);
+  argint(2, &gid);
+  if (uid < 0 || uid > 65535 || gid < 0 || gid > 65535)
+    return -1;
+  if (myproc()->uid != 0)
+    return -1;
+
+  begin_op();
+  if ((ip = namei(path)) == 0) {
+    end_op();
+    return -1;
+  }
+  ilock(ip);
+  ip->uid = uid;
+  ip->gid = gid;
+  iupdate(ip);
+  iunlockput(ip);
+  end_op();
   return 0;
 }
