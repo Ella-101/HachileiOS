@@ -188,6 +188,11 @@ found:
   p->prio = PRIO_DEFAULT;
   p->cur_prio = PRIO_DEFAULT;
   p->pgid = p->pid;
+  // A fresh process starts privileged: userinit() and forkret() need it
+  // to exec("/init").  The only way down is an explicit ksetuid(), and
+  // that does not come back up.
+  p->uid = 0;
+  p->gid = 0;
   p->pending = 0;
   p->sigmask = 0;
   memset(p->sighandlers, 0, sizeof(p->sighandlers));
@@ -346,6 +351,12 @@ kfork(void)
   }
   np->sz = p->sz;
   np->pgid = p->pgid;
+  // Identity is inherited, not reset.  A child of a process that dropped
+  // its privilege must not be born as root, or the drop would last only
+  // until the next fork.  kexec() replaces the address space rather than
+  // the process, so exec keeps the identity for the same reason.
+  np->uid = p->uid;
+  np->gid = p->gid;
   np->sigmask = p->sigmask;
   memmove(np->sighandlers, p->sighandlers, sizeof(np->sighandlers));
   np->sigframe = p->sigframe;
@@ -1045,6 +1056,63 @@ ksetprio(int pid, int prio)
     release(&p->lock);
   }
   return -1;
+}
+
+// Set the calling process's user identity.
+//
+// The entire privilege model is this one rule: uid 0 may set any uid, and
+// anyone else may only "set" the uid it already has.  The no-op form is not
+// a courtesy -- it lets a program that lowers its own privilege call this
+// unconditionally, with no branch on "am I root".
+//
+// There is no saved-uid and no setuid bit, so the change is one-way: once a
+// process is no longer root it can never become root again.  That is
+// deliberate.  Remembering the previous uid so it can be restored is exactly
+// the mechanism that turns a bug in a privileged program into an escalation.
+int
+ksetuid(int uid)
+{
+  struct proc *p = myproc();
+
+  if (uid < 0 || uid > 65535)
+    return -1;
+
+  acquire(&p->lock);
+  if (p->uid != 0 && uid != p->uid) {
+    release(&p->lock);
+    return -1;
+  }
+  p->uid = uid;
+  release(&p->lock);
+  return 0;
+}
+
+// Set the calling process's primary group.  Same rule as ksetuid().
+//
+// A separate call rather than "the group follows the user", because a group
+// is only useful if two accounts can share one.  With gid == uid the group
+// permission bits would be a copy of the owner bits and could never grant
+// anything the owner class had not already granted.
+//
+// Ordering matters for a caller that changes both: set the group FIRST,
+// while still privileged.  After ksetuid() a non-zero process can no longer
+// change its group.
+int
+ksetgid(int gid)
+{
+  struct proc *p = myproc();
+
+  if (gid < 0 || gid > 65535)
+    return -1;
+
+  acquire(&p->lock);
+  if (p->uid != 0 && gid != p->gid) {
+    release(&p->lock);
+    return -1;
+  }
+  p->gid = gid;
+  release(&p->lock);
+  return 0;
 }
 
 void

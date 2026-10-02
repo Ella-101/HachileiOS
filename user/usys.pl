@@ -60,3 +60,7 @@ entry("getpgid");
 entry("tcsetpgrp");
 entry("waitpg");
 entry("jobstate");
+entry("getuid");
+entry("getgid");
+entry("setuid");
+entry("setgid");

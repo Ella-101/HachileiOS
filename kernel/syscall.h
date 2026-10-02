@@ -38,3 +38,7 @@
 #define SYS_tcsetpgrp 37
 #define SYS_waitpg    38
 #define SYS_jobstate  39
+#define SYS_getuid    40
+#define SYS_getgid    41
+#define SYS_setuid    42
+#define SYS_setgid    43

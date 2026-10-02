@@ -92,6 +92,10 @@ struct proc {
   int prio;             // scheduling priority: smaller is more urgent
   int cur_prio;         // priority the scheduler compares; decays while waiting
   int pgid;
+  // Identity.  ushort to match the width the inode uses on disk, and
+  // because nothing here needs more than 65535 of either.
+  ushort uid; // 0 is the privileged identity
+  ushort gid; // primary group; see ksetgid()
   uint pending;
   uint sigmask;
   uint64 sighandlers[NSIG + 1];

@@ -114,6 +114,8 @@ extern uint64 sys_sigaction(void), sys_sigmask(void), sys_sigreturn(void);
 extern uint64 sys_signal(void), sys_killpg(void), sys_setpgid(void);
 extern uint64 sys_getpgid(void), sys_tcsetpgrp(void);
 extern uint64 sys_waitpg(void), sys_jobstate(void);
+extern uint64 sys_getuid(void), sys_getgid(void);
+extern uint64 sys_setuid(void), sys_setgid(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -158,6 +160,10 @@ static uint64 (*syscalls[])(void) = {
   [SYS_tcsetpgrp] = sys_tcsetpgrp,
   [SYS_waitpg] = sys_waitpg,
   [SYS_jobstate] = sys_jobstate,
+  [SYS_getuid] = sys_getuid,
+  [SYS_getgid] = sys_getgid,
+  [SYS_setuid] = sys_setuid,
+  [SYS_setgid] = sys_setgid,
   // clang-format on
 };
 

@@ -117,6 +117,8 @@ void            tty_setpgid(int);
 void            tty_interrupt(void);
 int             tty_signal(int);
 int             ksetprio(int, int);
+int             ksetuid(int);
+int             ksetgid(int);
 int             killed(struct proc*);
 void            setkilled(struct proc*);
 struct cpu*     mycpu(void);

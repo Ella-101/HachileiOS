@@ -331,3 +331,31 @@ sys_jobstate(void)
   argint(0, &pgid);
   return kjobstate(pgid);
 }
+
+uint64
+sys_getuid(void)
+{
+  return myproc()->uid;
+}
+
+uint64
+sys_getgid(void)
+{
+  return myproc()->gid;
+}
+
+uint64
+sys_setuid(void)
+{
+  int uid;
+  argint(0, &uid);
+  return ksetuid(uid);
+}
+
+uint64
+sys_setgid(void)
+{
+  int gid;
+  argint(0, &gid);
+  return ksetgid(gid);
+}
