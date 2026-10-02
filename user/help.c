@@ -81,7 +81,7 @@ static struct entry cmds[] = {
 
   {"self-checks", "cputest", "[ticks]",
    "cross-check CPU accounting against uptime()",
-   "Defaults to 20 ticks per phase; allows sampling skew.", 1},
+   "Defaults to 20 ticks per phase; a shorter window is raised to 10.", 1},
   {"self-checks", "waitxtest", "[ticks]",
    "cross-check waitx() against the child's own psinfo()",
    "Defaults to 5 ticks.  The parent may see more, never less.", 1},

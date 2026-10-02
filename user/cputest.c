@@ -20,6 +20,7 @@
 #include "user/user.h"
 
 #define TOLERANCE 4
+#define MIN_TICKS 10
 
 static struct psinfo procs[NPROC];
 
@@ -63,8 +64,18 @@ main(int argc, char *argv[])
 
   if (argc > 1)
     need = atoi(argv[1]);
-  if (need < 1)
-    need = 1;
+  // Below this the two checks say nothing.  Phase 1 compares |du - elapsed|
+  // against TOLERANCE, so a window no longer than TOLERANCE is accepted
+  // whatever the split was; and phase 2 would be weighing one coin-flip tick
+  // against `du`.  Raise the window and say so, rather than print a verdict
+  // whose PASS and FAIL both mean "no data".
+  if (need < MIN_TICKS) {
+    if (argc > 1)
+      printf("cputest: window raised to %d ticks; a shorter one cannot tell\n"
+             "cputest: user time from system time\n",
+             MIN_TICKS);
+    need = MIN_TICKS;
+  }
 
   // ---- phase 1: user time --------------------------------------------
   self(&u0, &k0);
